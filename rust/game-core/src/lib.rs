@@ -1,14 +1,6 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! The Lost World Rust game core.
+//!
+//! Game rules will be ported incrementally from OpenAlienNations.
+//! Asset format readers are the first portable foundation.
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub mod gd;
