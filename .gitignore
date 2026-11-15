@@ -31,3 +31,5 @@ __pycache__/
 build/
 tools/recorder/out/
 rec/
+
+/target/
