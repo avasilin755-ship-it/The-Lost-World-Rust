@@ -129,14 +129,18 @@ impl TerrainArt{
             variant.saturating_sub(*self.starts.get(class).unwrap_or(&0))
         }else{variant};
         let frame=(time.floor() as usize)%4;
+        const WATER_NAMES:[&str;4]=["wasser1","wasser2","wasser3","wasser4"];
+        const COAST_NAMES:[&str;4]=[
+            "transition1","transition2","transition3","transition4"
+        ];
         let texture=if mask>0&&mask<15{
             let n=MASKS.iter().position(|&m|m==mask).unwrap_or(0);
-            self.get(&format!("transition{}",frame+1),n)
+            self.get(COAST_NAMES[frame],n)
         }else if mask==15{
             if class>=self.water_class as usize+1||class==9&&self.water_class==9{
                 self.get("wasser1",variant)
             }else{
-                self.get(&format!("wasser{}",frame+1),variant)
+                self.get(WATER_NAMES[frame],variant)
             }
         }else{
             let name=self.class_names.get(class).copied().unwrap_or("wiese");
