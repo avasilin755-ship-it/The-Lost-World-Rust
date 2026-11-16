@@ -75,6 +75,9 @@ fn wrapped_step(from:(i32,i32),to:(i32,i32),size:i32)->Vec2{
     };
     vec2(wrap(to.0-from.0) as f32,wrap(to.1-from.1) as f32)
 }
+fn nearest_periodic_axis(value:f32,reference:f32,size:f32)->f32{
+    value+((reference-value)/size).round()*size
+}
 fn tween_cell(tween:&SpriteTween,tick:u64,sub_tick:f32)->Vec2{
     let elapsed=(tick.saturating_sub(tween.start_tick) as f32+sub_tick)
         /MOVE_INTERPOLATION_TICKS;
@@ -332,13 +335,31 @@ impl Game{
         let size=self.simulation.terrain.size as f32;
         vec2(v.x.rem_euclid(size),v.y.rem_euclid(size))
     }
+    /// The original world wraps both axes. Draw the periodic copy nearest
+    /// to the camera, so objects stay visible across the map boundary.
+    fn nearest_periodic_cell(&self,cell:Vec2)->Vec2{
+        let reference=unproject(self.camera);
+        let size=self.simulation.terrain.size as f32;
+        vec2(
+            nearest_periodic_axis(cell.x,reference.x,size),
+            nearest_periodic_axis(cell.y,reference.y,size),
+        )
+    }
     fn object_screen(&self,entity:&Entity)->Vec2{
-        let cell=self.visual_cell(entity);
+        let cell=self.nearest_periodic_cell(self.visual_cell(entity));
         self.screen(cell.x,cell.y)
     }
     fn pick_cell(&self,screen:Vec2)->(i32,i32){
         let world=(screen-self.center())/self.zoom+self.camera;
-        let p=unproject(world);
+        // Invert elevation as well as planar projection; the old picker
+        // missed objects on raised ground by several cells.
+        let mut p=unproject(world);
+        for _ in 0..4{
+            let h=self.simulation.terrain.height[
+                self.simulation.terrain.index(p.x.round() as i32,p.y.round() as i32)
+            ];
+            p=unproject(world+vec2(0.0,h as f32-128.0));
+        }
         let n=self.simulation.terrain.size as i32;
         ((p.x.round() as i32).rem_euclid(n),(p.y.round() as i32).rem_euclid(n))
     }
@@ -720,16 +741,20 @@ impl Game{
         let origin=self.center();
         // Derive a rectangle of world cells from the visible screen
         // region. This is far smaller than traversing a full 512x512 map.
-        let center=unproject(self.camera);
-        let extent=((width+sh)/32.0/self.zoom).ceil() as i32+12;
-        let range=extent.clamp(22,110);
-        let cx=center.x.round() as i32;
-        let cy=center.y.round() as i32;
+        // Unproject the visible corners to avoid the old overdraw of 220x220
+        // tiles, while retaining height slack for raised land.
+        let corners=[
+            vec2(-160.0,-260.0),vec2(width+160.0,-260.0),
+            vec2(-160.0,sh+260.0),vec2(width+160.0,sh+260.0)
+        ];
+        let inv=corners.map(|point|unproject(
+            (point-origin)/self.zoom+self.camera
+        ));
+        let x0=inv.iter().map(|v|v.x).fold(f32::INFINITY,f32::min).floor() as i32-18;
+        let y0=inv.iter().map(|v|v.y).fold(f32::INFINITY,f32::min).floor() as i32-18;
+        let x1=inv.iter().map(|v|v.x).fold(f32::NEG_INFINITY,f32::max).ceil() as i32+18;
+        let y1=inv.iter().map(|v|v.y).fold(f32::NEG_INFINITY,f32::max).ceil() as i32+18;
         let n=self.simulation.terrain.size as i32;
-        let x0=(cx-range).max(0);
-        let y0=(cy-range).max(0);
-        let x1=(cx+range).min(n-2);
-        let y1=(cy+range).min(n-2);
         let time=get_time();
         for y in y0..=y1{
             for x in x0..=x1{
@@ -915,12 +940,28 @@ impl Game{
         classic_ui::draw(self);
     }
     async fn run(mut self){
+        #[cfg(all(not(target_arch="wasm32"),not(target_os="android")))]
+        let limit=std::time::Duration::from_secs_f64(
+            1.0/env::var("TLW_MAX_FPS").ok()
+                .and_then(|x|x.parse::<f64>().ok())
+                .filter(|fps|fps.is_finite()&&*fps>=30.0&&*fps<=144.0)
+                .unwrap_or(60.0)
+        );
         loop{
+            #[cfg(all(not(target_arch="wasm32"),not(target_os="android")))]
+            let frame_start=std::time::Instant::now();
             self.update();
             clear_background(Color::from_rgba(26,42,37,255));
             self.draw_world();
             self.draw_selection_marquee();
             self.draw_hud();
+            #[cfg(all(not(target_arch="wasm32"),not(target_os="android")))]
+            {
+                let elapsed=frame_start.elapsed();
+                if elapsed<limit{
+                    std::thread::sleep(limit-elapsed);
+                }
+            }
             next_frame().await;
         }
     }
