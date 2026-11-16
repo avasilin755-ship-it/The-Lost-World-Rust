@@ -1,8 +1,26 @@
-# The Lost World — local sprite viewer
+# The Lost World — sprite viewer (direct GD support)
+
+The viewer now supports loading original .gd archives directly into GPU textures.
+It reads only the sprite index and selected image block, not all artwork.
+PNG-folder preview mode is still supported.
+
+## Open Mission Pack from original archive (PowerShell)
+
+    $root = "$HOME\Games\DieVolker_Original"
+    cargo run --manifest-path rust/sprite-viewer/Cargo.toml -- "$root\GameAssets\MissionPack\ADDON.GD" 'SA\VE\TRANSPORTSCHIFF\MG7'
+
+## Open base game directly (PowerShell)
+
+    $baseGD = Get-ChildItem "$root\GameAssets\Base" -Recurse -File -Filter "dv.gd" | Select-Object -First 1 -ExpandProperty FullName
+    cargo run --manifest-path rust/sprite-viewer/Cargo.toml -- "$baseGD" 'SA\VE\WIRT\MG7'
+
+Local original assets are never committed or uploaded by this viewer.
+
+## Legacy PNG-folder viewer and controls
+
 
 A temporary standalone desktop prototype using Rust and Macroquad 0.4.16.
-It previews original `.gd` animation frames **after** exporting them to PNG using
-`cargo run -p game-core --example gd_export_png`.
+It can also preview PNG animations previously exported by `gd_export_png`.
 
 The game assets are read locally only and are **not** part of this repository.
 
