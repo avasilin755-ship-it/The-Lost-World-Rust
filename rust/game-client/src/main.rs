@@ -922,8 +922,13 @@ impl Game{
         }
         // Lightweight camera indicator, updated per frame.
         let centre=unproject(self.camera);
-        draw_circle_lines(x+centre.x/n*width,y+centre.y/n*height,
-            7.0,1.0,WHITE);
+        // Camera can cross the torus seam; normalize the minimap indicator
+        // to 0..n rather than letting it disappear off its panel.
+        draw_circle_lines(
+            x+centre.x.rem_euclid(n)/n*width,
+            y+centre.y.rem_euclid(n)/n*height,
+            7.0,1.0,WHITE
+        );
     }
     fn minimap_bounds(&self)->Option<(f32,f32,f32,f32)>{
         if !self.minimap{return None}
@@ -1028,6 +1033,12 @@ async fn main(){
 #[cfg(test)]
 mod motion_tests{
     use super::*;
+    #[test]
+    fn toroidal_entity_projection_is_camera_relative(){
+        assert_eq!(nearest_periodic_axis(1.0,126.0,128.0),129.0);
+        assert_eq!(nearest_periodic_axis(127.0,2.0,128.0),-1.0);
+        assert_eq!(nearest_periodic_axis(12.0,15.0,128.0),12.0);
+    }
     #[test]
     fn interpolates_one_original_grid_step_over_six_ticks(){
         let motion=SpriteTween{
