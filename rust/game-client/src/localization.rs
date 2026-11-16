@@ -82,6 +82,7 @@ pub fn task_name(lang:Language,task:&Task)->&'static str{
             Task::Delivering{..}=>"Несёт на склад",
             Task::Constructing{..}=>"Строит",
             Task::Holding{..}=>"Несёт груз (нет склада)",
+            Task::Fetching{..}=>"Забирает материал со склада",
         },
         Language::English=>match task{
             Task::Idle=>"Idle",
@@ -90,6 +91,7 @@ pub fn task_name(lang:Language,task:&Task)->&'static str{
             Task::Delivering{..}=>"Delivering",
             Task::Constructing{..}=>"Building",
             Task::Holding{..}=>"Carrying / no storage",
+            Task::Fetching{..}=>"Fetching building materials",
         }
     }
 }
