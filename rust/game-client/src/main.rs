@@ -214,6 +214,7 @@ struct Game {
     ui_font:Option<Font>,
     lang:Language,
     ui:ClassicUi,
+    show_debug:bool,
     last_positions:HashMap<u32,(i32,i32)>,
     tweens:HashMap<u32,SpriteTween>,
 }
@@ -291,7 +292,8 @@ impl Game{
             selected:Selection::default(),accumulator:0.0,
             minimap:true,stored:map.terrain.is_some(),save_file,toast:None,
             left_press:None,right_press:None,last_click:None,
-            ui_font,lang,ui,last_positions,tweens:HashMap::new(),
+            ui_font,lang,ui,show_debug:false,
+            last_positions,tweens:HashMap::new(),
         })
     }
 
@@ -561,6 +563,9 @@ impl Game{
                     match self.simulation.build(unit,oid,target){
                         Ok(id)=>{
                             self.selected.object=Some(id);
+                            self.minimap_ground=minimap_ground_texture(
+                                &self.simulation.terrain
+                            );
                             self.notify(if self.lang==Language::Russian{
                                 format!("Строительство начато: объект №{ty}")
                             }else{format!("Construction started: type {ty}")})
@@ -621,6 +626,7 @@ impl Game{
         match result{
             Ok(())=>{
                 self.reset_sprite_movements();
+                self.minimap_ground=minimap_ground_texture(&self.simulation.terrain);
                 self.notify(if self.lang==Language::Russian{
                     "Сохранение загружено"
                 }else{"Snapshot restored"})
@@ -667,6 +673,7 @@ impl Game{
                 }
             }
         }
+        if is_key_pressed(KeyCode::F3){self.show_debug=!self.show_debug}
         if is_key_pressed(KeyCode::F4){self.minimap=!self.minimap}
         if is_key_pressed(KeyCode::F5){self.quick_save()}
         if is_key_pressed(KeyCode::F9){self.quick_load()}
@@ -944,6 +951,17 @@ impl Game{
     }
     fn draw_hud(&self){
         classic_ui::draw(self);
+        if self.show_debug{
+            let message=format!(
+                "FPS: {}  |  GD cache: {}  |  Objects: {}  |  Tick: {}  |  Zoom: {:.2}x",
+                get_fps(),self.sprites.cache_size(),
+                self.simulation.objects.len(),self.simulation.tick,self.zoom,
+            );
+            draw_rectangle(8.0,56.0,
+                measure_text(&message,self.ui_font.as_ref(),16,1.0).width+22.0,
+                28.0,Color::from_rgba(15,22,19,207));
+            self.draw_ui(&message,17.0,76.0,16.0,GOLD);
+        }
     }
     async fn run(mut self){
         #[cfg(all(not(target_arch="wasm32"),not(target_os="android")))]
