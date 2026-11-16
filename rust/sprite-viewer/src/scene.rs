@@ -5,8 +5,9 @@
 //! this scene draws an example house's named layers but does not yet simulate jobs.
 
 use game_core::gd::{GdEntry, OpacityMode, decode_gd_frames, gd_index_size, parse_gd_index};
+use game_core::od::{OdAnchor, OdIndex, parse_od};
 use macroquad::prelude::*;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 
@@ -19,6 +20,7 @@ const BOTTOM_BAR: f32 = 48.0;
 struct Archive {
     path: PathBuf,
     entries: Vec<GdEntry>,
+    od: OdIndex,
 }
 
 impl Archive {
@@ -36,8 +38,19 @@ impl Archive {
         file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
         file.read_exact(&mut bytes).map_err(|e| e.to_string())?;
         let index = parse_gd_index(&bytes, size).map_err(|e| e.to_string())?;
-        println!("Scene archive: {} ({} entries)", path.display(), index.entries.len());
-        Ok(Self { path, entries: index.entries })
+        // Companion OD files preserve the original ground anchor and layer
+        // descriptors. They sit next to dv.gd / ADDON.GD in the extracted data.
+        let od_path = path.with_extension("OD");
+        let od_bytes = fs::read(&od_path).map_err(|e| format!(
+            "Missing original object descriptions {}: {e}", od_path.display()
+        ))?;
+        let od = parse_od(&od_bytes)
+            .map_err(|e| format!("Cannot parse {}: {e}", od_path.display()))?;
+        println!(
+            "Scene archive: {} ({} GD sprites; {} OD objects; {} anchor records)",
+            path.display(), index.entries.len(), od.objects.len(), od.anchors.len()
+        );
+        Ok(Self { path, entries: index.entries, od })
     }
 
     fn find(&self, name: &str) -> Option<&GdEntry> {
@@ -98,8 +111,13 @@ impl Archive {
             texture.set_filter(FilterMode::Nearest);
             frames.push(texture);
         }
+        let anchor = self.od.anchor(&entry.name).ok_or_else(|| format!(
+            "No original OD anchor for {} in {}", entry.name, self.path.display()
+        ))?;
         Ok(SpriteAsset {
-            name: entry.name.clone(), left: entry.left, top: entry.top, frames,
+            name: entry.name.clone(),
+            left: entry.left, top: entry.top, anchor,
+            frames,
         })
     }
 }
@@ -108,7 +126,14 @@ struct SpriteAsset {
     name: String,
     left: i32,
     top: i32,
+    anchor: OdAnchor,
     frames: Vec<Texture2D>,
+}
+
+/// Source-of-truth coordinate formula from docs/formats/od-odb.md:
+/// GD image rectangle and OD object anchor use the same sprite canvas.
+fn sprite_top_left(cell: Vec2, left: i32, top: i32, anchor: OdAnchor, zoom: f32) -> Vec2 {
+    cell + vec2((left - anchor.x) as f32, (top - anchor.y) as f32) * zoom
 }
 
 impl SpriteAsset {
@@ -119,10 +144,11 @@ impl SpriteAsset {
             0
         };
         let texture = &self.frames[index];
+        let top_left = sprite_top_left(vec2(x, y), self.left, self.top, self.anchor, zoom);
         draw_texture_ex(
             texture,
-            x + self.left as f32 * zoom,
-            y + self.top as f32 * zoom,
+            top_left.x.floor(),
+            top_left.y.floor(),
             WHITE,
             DrawTextureParams {
                 dest_size: Some(vec2(texture.width() * zoom, texture.height() * zoom)),
@@ -457,6 +483,21 @@ pub async fn run(base_path: PathBuf, addon_path: PathBuf) -> Result<(), String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn original_od_anchors_align_sprites_to_ground_points() {
+        let gd_left = 30;
+        let gd_top = 18;
+        let anchor = OdAnchor { x: 112, y: 142 };
+        assert_eq!(
+            sprite_top_left(vec2(350.0, 200.0), gd_left, gd_top, anchor, 1.0),
+            vec2(268.0, 76.0),
+        );
+        assert_eq!(
+            sprite_top_left(vec2(350.0, 200.0), gd_left, gd_top, anchor, 2.0),
+            vec2(186.0, -48.0),
+        );
+    }
 
     #[test]
     fn projection_round_trip_is_stable() {
