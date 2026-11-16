@@ -31,16 +31,19 @@ Mission records are ordered by their original numeric index, not file position.
 ## Controls
 
 - Left click: select a unit, building, animal or tree
-- Right click: move selected unit; clicking a nature object starts gathering
+- Right click: move selected unit, gather a nature object, or resume unfinished construction
 - 1 / 2 / 3: house / town hall / warehouse construction tool
 - Left click terrain with construction tool and selected unit: place site
 - 0 / Esc: cancel construction placement
 - WASD / arrows: pan the world camera
 - Mouse wheel: zoom
 - Middle mouse drag: pan
+- X: explicitly discard undelivered cargo when no reachable storage exists (cargo is lost)
+- Building preview: green footprint means valid placement; red means invalid or worker busy
+- Construction: finish the current job before placing another; sites have progress and can be resumed by right-click
 - P: pause and resume simulation
 - F4: minimap
-- F5 / F9: quick save / load a local TLWSNAP file
+- F5 / F9: quick save / load a local TLWSNAP2 file (restores jobs and cargo; TLWSNAP1 loads are supported)
 - The save path is under the project root in saves/ and ignored by Git
 
 ## How the new Rust modules relate to the original files
@@ -97,3 +100,22 @@ cargo check --manifest-path rust/game-client/Cargo.toml --all-targets
 ~~~
 
 Keep the original GD/OD/OS/MDB/DVM/ODB files outside the repository.
+
+## Resource-animation and gameplay fixes (2026-11-16)
+
+- Static nature objects use their idle sprite until a worker harvests them.
+  A short depletion animation plays once, at the end of harvesting.
+- Animation frames are now derived from simulation job states, not wall time.
+  Frozen/paused worlds no longer play resource destruction loops.
+- Construction placement checks the complete ODB footprint, storage costs,
+  current worker job, and path to the foundation perimeter.
+- Incomplete buildings are tinted with a progress indicator; they can be
+  resumed with a right-click, without paying the materials twice.
+- Only completed storage buildings accept deliveries. A worker keeps cargo
+  when storage is missing/unreachable, and automatically retries.
+- To avoid getting stuck with the only builder carrying undeliverable goods,
+  select that builder and press X. This **intentionally loses carried goods**.
+- Until the original settlement-creation system is restored, each race is
+  limited to one Town Hall to prevent unlimited free Town Hall placement.
+- The renderer and simulation have automated regression tests. The exact
+  appearance with the original external GD/OD assets must be verified locally.

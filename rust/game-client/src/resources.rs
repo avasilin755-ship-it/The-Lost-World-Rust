@@ -252,15 +252,39 @@ pub struct Layer {
     textures:Vec<Texture2D>,
     offset:Vec2,
 }
+/// Animation frames are driven by simulation state, never by global wall time.
+#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+pub enum SpriteMotion{
+    /// Trees, bushes, rocks, idle workers and complete buildings stay on frame 0.
+    Still,
+    /// Active units use a repeating walk/work cycle.
+    Loop(u64),
+    /// Resource depletion uses the original frames exactly once, at harvest end.
+    Finish{elapsed:u64,duration:u64},
+}
+impl SpriteMotion{
+    fn frame(self,count:usize)->usize{
+        if count<=1{return 0}
+        match self{
+            Self::Still=>0,
+            Self::Loop(tick)=>((tick/2) as usize)%count,
+            Self::Finish{elapsed,duration}=>{
+                let duration=duration.max(1);
+                let elapsed=elapsed.min(duration-1);
+                ((elapsed as u128*count as u128/duration as u128) as usize).min(count-1)
+            }
+        }
+    }
+}
 pub struct SpriteArt {layers:Vec<Layer>}
 impl SpriteArt {
-    pub fn draw(&self,screen:Vec2,zoom:f32,seconds:f64){
+    pub fn draw(&self,screen:Vec2,zoom:f32,motion:SpriteMotion,tint:Color){
         for layer in &self.layers{
             let n=layer.textures.len();
             if n==0{continue}
-            let t=&layer.textures[(seconds*8.0) as usize%n];
+            let t=&layer.textures[motion.frame(n)];
             let pos=screen+layer.offset*zoom;
-            draw_texture_ex(t,pos.x.floor(),pos.y.floor(),WHITE,
+            draw_texture_ex(t,pos.x.floor(),pos.y.floor(),tint,
                 DrawTextureParams{
                     dest_size:Some(t.size()*zoom),
                     ..Default::default()
@@ -296,6 +320,17 @@ impl WorldArt{
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn idle_resource_never_cycles_through_death_frames(){
+        for count in 1..=16{
+            assert_eq!(SpriteMotion::Still.frame(count),0);
+        }
+        assert_eq!(SpriteMotion::Loop(0).frame(4),0);
+        assert_eq!(SpriteMotion::Loop(6).frame(4),3);
+        assert_eq!(SpriteMotion::Finish{elapsed:0,duration:12}.frame(6),0);
+        assert_eq!(SpriteMotion::Finish{elapsed:11,duration:12}.frame(6),5);
+        assert_eq!(SpriteMotion::Finish{elapsed:100,duration:12}.frame(6),5);
+    }
     #[test]
     fn isometric_projection_respects_source_coordinates(){
         assert_eq!(project(1.0,0.0,128),vec2(-32.0,22.0));

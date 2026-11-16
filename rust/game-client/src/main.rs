@@ -14,7 +14,7 @@ use game_core::{
     terrain::{Terrain,generate_base},
 };
 use macroquad::prelude::*;
-use resources::{WorldArt,TerrainArt,project,unproject,world_to_screen};
+use resources::{WorldArt,TerrainArt,SpriteMotion,project,unproject,world_to_screen};
 use std::{env,fs,path::{Path,PathBuf}};
 
 const TOP:f32=91.0;
@@ -242,6 +242,8 @@ impl Game{
         let result=if let Some(t)=target_id{
             match self.simulation.entity(t){
                 Some(o) if o.kind==2=>self.simulation.order_gather(unit,t),
+                Some(o) if o.kind==1 && !o.complete
+                    =>self.simulation.order_construct(unit,t),
                 _=>self.simulation.order_move(unit,target)
             }
         }else{self.simulation.order_move(unit,target)};
@@ -258,6 +260,14 @@ impl Game{
             self.selected.error=None;
         }
         if is_key_pressed(KeyCode::P){self.simulation.paused=!self.simulation.paused}
+        if is_key_pressed(KeyCode::X){
+            if let Some(unit)=self.selected.unit{
+                match self.simulation.drop_cargo(unit){
+                    Ok(())=>self.notify("Carried resources dropped; worker is free"),
+                    Err(e)=>self.notify(format!("Cannot drop cargo: {e}")),
+                }
+            }
+        }
         if is_key_pressed(KeyCode::F4){self.minimap=!self.minimap}
         if is_key_pressed(KeyCode::F5){
             let result=fs::create_dir_all("saves")
@@ -341,6 +351,12 @@ impl Game{
             }
         }
 
+        // Animate world objects only when simulation jobs authorize playback.
+        let active_harvest:std::collections::HashMap<u32,u16>=self.simulation.objects.iter()
+            .filter_map(|o|match &o.task{
+                Task::Gathering{tree,time}=>Some((*tree,*time)),
+                _=>None,
+            }).collect();
         // Objects sorted by ground depth, then by x-screen order;
         // all terrain renders before world objects.
         let mut visible:Vec<(i32,i32,usize)>=self.simulation.objects.iter()
@@ -360,8 +376,27 @@ impl Game{
                 draw_circle_lines(position.x,position.y,
                     21.0*self.zoom,2.0,YELLOW);
             }
+            let motion=if obj.kind==2{
+                // Depletion frames play only during the final 12 harvest ticks.
+                match active_harvest.get(&obj.id).copied(){
+                    Some(t) if t>=48=>SpriteMotion::Finish{
+                        elapsed:(t-48) as u64,duration:12
+                    },
+                    _=>SpriteMotion::Still,
+                }
+            }else if obj.kind==0{
+                match &obj.task{
+                    Task::Walking{..}|Task::Constructing{..}
+                        =>SpriteMotion::Loop(self.simulation.tick),
+                    Task::Gathering{time,..}=>SpriteMotion::Loop(*time as u64),
+                    _=>SpriteMotion::Still,
+                }
+            }else{SpriteMotion::Still};
             if let Some(art)=self.sprites.get(oid){
-                art.draw(position,self.zoom,time)
+                let tint=if obj.kind==1 && !obj.complete{
+                    Color::from_rgba(225,225,193,120)
+                }else{WHITE};
+                art.draw(position,self.zoom,motion,tint)
             }else{
                 // Some rare original object descriptors have no matching GD art.
                 // Show a debug symbol instead of silently hiding game entities.
@@ -374,6 +409,33 @@ impl Game{
                 let y=position.y+5.0*self.zoom;
                 draw_rectangle(x,y,w,4.0,DARKGRAY);
                 draw_rectangle(x,y,w*obj.construction as f32/100.0,4.0,YELLOW);
+            }
+        }
+        // Preview each cell of the actual isometric construction footprint.
+        if let (Some(ty),Some(unit))=(self.selected.build,self.selected.unit){
+            let (mx,my)=mouse_position();
+            if mx>=0.0&&mx<width&&my>=TOP&&my<sh-FOOT{
+                let at=self.pick_cell(vec2(mx,my));
+                let id=rule_id(self.simulation.human_race,ty);
+                if let Some(rule)=self.simulation.rules.get(&id){
+                    let valid=self.simulation.can_build(unit,id,at).is_ok();
+                    let color=if valid{Color::from_rgba(85,222,102,230)}
+                        else{Color::from_rgba(238,85,72,230)};
+                    for dx in 0..rule.size_x.clamp(1,32){
+                        for dy in 0..rule.size_y.clamp(1,32){
+                            let x=at.0-dx;
+                            let y=at.1-dy;
+                            if x<0||y<0||x>=n-1||y>=n-1{continue}
+                            let a=self.screen(x as f32,y as f32);
+                            let b=self.screen((x+1) as f32,y as f32);
+                            let c=self.screen((x+1) as f32,(y+1) as f32);
+                            let d=self.screen(x as f32,(y+1) as f32);
+                            for (p,q) in [(a,b),(b,c),(c,d),(d,a)]{
+                                draw_line(p.x,p.y,q.x,q.y,2.0,color);
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -439,6 +501,12 @@ impl Game{
                 if active{Color::from_rgba(88,93,52,255)}
                 else{Color::from_rgba(49,60,43,255)});
             draw_text(name,side_x+23.0,y+24.0,20.0,WHITE);
+            if let Some(rule)=self.simulation.rules.get(
+                &rule_id(self.simulation.human_race,ty)){
+                let costs=format!("W{} S{} F{}",
+                    rule.cost[1].max(0),rule.cost[2].max(0),rule.cost[4].max(0));
+                draw_text(&costs,side_x+174.0,y+24.0,13.0,LIGHTGRAY);
+            }
         }
         draw_text("0 - CANCEL BUILD",side_x+17.0,TOP+323.0,17.0,LIGHTGRAY);
         draw_text("SELECTED",side_x+16.0,TOP+372.0,22.0,GOLD);
@@ -459,9 +527,14 @@ impl Game{
                     Task::Gathering{..}=>"Gathering",
                     Task::Delivering{..}=>"Delivering",
                     Task::Constructing{..}=>"Building",
+                    Task::Holding{..}=>"Carrying / no storage",
                 };
                 draw_text(&format!("Task: {task}"),side_x+16.0,TOP+454.0,
                     17.0,YELLOW);
+                if o.kind==1 && !o.complete{
+                    draw_text(&format!("Construction: {}%",o.construction),
+                        side_x+16.0,TOP+478.0,17.0,ORANGE);
+                }
             }
         }else{
             draw_text("Click a unit or object",side_x+16.0,TOP+403.0,18.0,WHITE);
@@ -473,11 +546,11 @@ impl Game{
         }
         draw_rectangle(0.0,sh-FOOT,sw,FOOT,Color::from_rgba(17,25,22,255));
         draw_text(
-            "LMB SELECT / PLACE    RMB ORDER / HARVEST    WASD PAN    WHEEL ZOOM    1-3 BUILD    0 CANCEL",
+            "LMB SELECT / PLACE    RMB ORDER / HARVEST / RESUME BUILD    WASD PAN    WHEEL ZOOM",
             14.0,sh-30.0,19.0,LIGHTGRAY
         );
         draw_text(
-            "P PAUSE    F4 MINIMAP    F5 SAVE    F9 LOAD    middle-drag PAN",
+            "P PAUSE    X DROP UNDELIVERED CARGO    F4 MAP    F5 SAVE    F9 LOAD",
             14.0,sh-10.0,16.0,GRAY
         );
         if let Some((message,until))=&self.toast{
