@@ -38,13 +38,20 @@ pub fn world_to_screen(
     )];
     (project(x,y,h)-camera)*zoom+origin
 }
+#[derive(Clone,Copy,Debug)]
+struct AtlasTile {
+    u0:f32,v0:f32,u1:f32,v1:f32,
+}
 pub struct TileSet {
-    pub textures:Vec<Texture2D>,
+    tiles:Vec<AtlasTile>,
     pub pick:[u8;256],
     /// True per-tile RGB mean from the original 64x64 OS artwork.
     pub minimap_rgb:Vec<[u8;3]>,
 }
 pub struct TerrainArt{
+    /// One source-faithful atlas for every native .os terrain frame.
+    /// Single GPU binding instead of hundreds of 64x64 textures.
+    atlas:Texture2D,
     sets:HashMap<String,TileSet>,
     class_names:Vec<&'static str>,
     starts:Vec<usize>,
@@ -64,44 +71,79 @@ impl TerrainArt{
         let mut required:HashSet<&str>=class_names.iter().copied().collect();
         required.extend(["wasser1","wasser2","wasser3","wasser4",
             "transition1","transition2","transition3","transition4"]);
-        let mut sets=HashMap::new();
-        for name in required{
+        // Decode all original OS tile data on the CPU before GPU upload.
+        // A single atlas avoids texture binds on every distant-map cell.
+        let mut names=required.into_iter().collect::<Vec<_>>();
+        names.sort_unstable();
+        let mut decoded=Vec::with_capacity(names.len());
+        for name in names{
             let path=dir.join(format!("{name}.os"));
             let bytes=fs::read(&path)
                 .map_err(|e|format!("Cannot open {}: {e}",path.display()))?;
             let tiles=parse_os(&bytes)
                 .map_err(|e|format!("Cannot decode {}: {e}",path.display()))?;
-            let mut textures=Vec::with_capacity(tiles.tiles.len());
-            let mut minimap_rgb=Vec::with_capacity(tiles.tiles.len());
-            for tile in tiles.tiles{
+            decoded.push((name.to_owned(),tiles));
+        }
+        let total=decoded.iter().map(|(_,set)|set.tiles.len()).sum::<usize>();
+        let mut cols=1usize;
+        while cols*cols<total{cols+=1}
+        let rows=total.div_ceil(cols);
+        let atlas_w=(cols*64).next_power_of_two();
+        let atlas_h=(rows*64).next_power_of_two();
+        if atlas_w>4096||atlas_h>4096{
+            return Err("Original OS atlas exceeds safe 4096x4096 texture limit".into())
+        }
+        let mut rgba=vec![0u8;atlas_w*atlas_h*4];
+        let mut sets=HashMap::new();
+        let mut ordinal=0usize;
+        for (name,set) in decoded{
+            let mut atlas_tiles=Vec::with_capacity(set.tiles.len());
+            let mut minimap_rgb=Vec::with_capacity(set.tiles.len());
+            for tile in set.tiles{
+                let gx=(ordinal%cols)*64;
+                let gy=(ordinal/cols)*64;
+                for row in 0..64{
+                    let dst=((gy+row)*atlas_w+gx)*4;
+                    let src=row*64*4;
+                    rgba[dst..dst+64*4]
+                        .copy_from_slice(&tile.rgba[src..src+64*4]);
+                }
+                // Bilinear-blind half-pixel inset avoids neighbour bleeding
+                // even when transformed at non-integer camera zoom.
+                atlas_tiles.push(AtlasTile{
+                    u0:(gx as f32+0.5)/atlas_w as f32,
+                    v0:(gy as f32+0.5)/atlas_h as f32,
+                    u1:(gx as f32+63.5)/atlas_w as f32,
+                    v1:(gy as f32+63.5)/atlas_h as f32,
+                });
                 let mut sum=[0u64;3];
-                let pixel_count=(tile.width*tile.height) as u64;
                 for px in tile.rgba.chunks_exact(4){
                     for channel in 0..3{sum[channel]+=u64::from(px[channel])}
                 }
                 minimap_rgb.push([
-                    (sum[0]/pixel_count) as u8,
-                    (sum[1]/pixel_count) as u8,
-                    (sum[2]/pixel_count) as u8,
+                    (sum[0]/4096) as u8,
+                    (sum[1]/4096) as u8,
+                    (sum[2]/4096) as u8,
                 ]);
-                let texture=Texture2D::from_rgba8(
-                    tile.width as u16,tile.height as u16,&tile.rgba
-                );
-                texture.set_filter(FilterMode::Nearest);
-                textures.push(texture);
+                ordinal+=1;
             }
-            sets.insert(name.to_owned(),TileSet{
-                textures,pick:tiles.pick,minimap_rgb
+            sets.insert(name,TileSet{
+                tiles:atlas_tiles,pick:set.pick,minimap_rgb
             });
         }
+        let atlas=Texture2D::from_rgba8(
+            atlas_w as u16,atlas_h as u16,&rgba
+        );
+        atlas.set_filter(FilterMode::Nearest);
+        println!("Native OS atlas: {total} tiles in {atlas_w}x{atlas_h} RGBA");
         let mut start=0usize;
         let mut starts=Vec::new();
         for name in &class_names{
             starts.push(start);
-            start+=sets[*name].textures.len();
+            start+=sets[*name].tiles.len();
         }
         if start>256{return Err("Original global tile indices exceed 256".into())}
-        Ok(Self{sets,class_names,starts,water_class:if addon{9}else{11}})
+        Ok(Self{atlas,sets,class_names,starts,water_class:if addon{9}else{11}})
     }
     pub fn pick_tables(&self)->[[u8;256];12]{
         let mut p=[[0u8;256];12];
@@ -114,7 +156,7 @@ impl TerrainArt{
         let mut result=[0u8;256];
         for (c,name) in self.class_names.iter().enumerate(){
             let start=self.starts[c];
-            let length=self.sets[*name].textures.len();
+            let length=self.sets[*name].tiles.len();
             for value in &mut result[start..start+length]{
                 *value=c as u8;
             }
@@ -135,9 +177,9 @@ impl TerrainArt{
         }else{variant};
         tiles[local%tiles.len()]
     }
-    fn get(&self,name:&str,index:usize)->&Texture2D{
+    fn get(&self,name:&str,index:usize)->AtlasTile{
         let set=&self.sets[name];
-        &set.textures[index%set.textures.len()]
+        set.tiles[index%set.tiles.len()]
     }
     /// Screen projection for this cell's four vertices. Heights can differ.
     pub fn draw_cell(
@@ -182,20 +224,20 @@ impl TerrainArt{
             (project(px as f32,py as f32,h)-camera)*zoom+origin
         };
         let top=coord(0);let left=coord(1);let right=coord(2);let bottom=coord(3);
-        let mesh_for=|tex:&Texture2D,alphas:[u8;4]|{
+        let mesh_for=|tex:AtlasTile,alphas:[u8;4]|{
             let shade=|x:i32,y:i32,alpha:u8|{
                 let light=terrain.light[terrain.index(x,y)];
                 Color::from_rgba(light,light,light,alpha)
             };
             Mesh{
                 vertices:vec![
-                    Vertex::new(top.x,top.y,0.0,1.0,1.0,shade(x,y,alphas[0])),
-                    Vertex::new(left.x,left.y,0.0,0.0,1.0,shade(x+1,y,alphas[1])),
-                    Vertex::new(right.x,right.y,0.0,1.0,0.0,shade(x,y+1,alphas[2])),
-                    Vertex::new(bottom.x,bottom.y,0.0,0.0,0.0,shade(x+1,y+1,alphas[3]))
+                    Vertex::new(top.x,top.y,0.0,tex.u1,tex.v1,shade(x,y,alphas[0])),
+                    Vertex::new(left.x,left.y,0.0,tex.u0,tex.v1,shade(x+1,y,alphas[1])),
+                    Vertex::new(right.x,right.y,0.0,tex.u1,tex.v0,shade(x,y+1,alphas[2])),
+                    Vertex::new(bottom.x,bottom.y,0.0,tex.u0,tex.v0,shade(x+1,y+1,alphas[3]))
                 ],
                 indices:vec![0,1,2,1,2,3],
-                texture:Some(tex.clone()),
+                texture:Some(self.atlas.clone()),
             }
         };
         draw_mesh(&mesh_for(texture,[255;4]));
