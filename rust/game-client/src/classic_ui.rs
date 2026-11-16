@@ -68,9 +68,9 @@ fn buildable(g:&Game,ty:i32)->bool{
         o.kind==1&&o.group==g.simulation.human_race&&o.object_type==40
     ){return false}
     let rule=g.simulation.rules.get(&rule_id(g.simulation.human_race,ty));
-    rule.is_some_and(|r|r.cost.iter().enumerate().all(|(i,&c)|
-        c.max(0)<=g.simulation.goods[i]
-    ))
+    // Original game allows placing a construction site without goods;
+    // the request stays pending until its transporters can deliver them.
+    rule.is_some_and(|r|r.kind==1&&r.group==g.simulation.human_race)
 }
 fn build_entries(g:&Game)->Vec<(i32,String,bool,String)>{
     let language_ru=g.lang==crate::localization::Language::Russian;
@@ -260,9 +260,28 @@ pub fn draw(g:&Game){
                                     if ru{"Готовность"}else{"Progress"},
                                     obj.construction),
                                     10.0,562.0,12.0,ORANGE);
+                                if let Some(site)=g.simulation.sites.get(&id){
+                                    txt(g,if ru{"Материалы на площадке"}
+                                        else{"Site materials delivered / needed"},
+                                        10.0,585.0,12.0,GOLD);
+                                    txt(g,&format!(
+                                        "{}: {}/{}  {}: {}/{}",
+                                        if ru{"Д"}else{"W"},
+                                        site.stock[1],site.remaining[1],
+                                        if ru{"К"}else{"S"},
+                                        site.stock[2],site.remaining[2],
+                                    ),10.0,610.0,12.0,WHITE);
+                                    let missing=site.remaining.iter().zip(site.stock.iter())
+                                        .any(|(&n,&stock)|n>stock);
+                                    if missing{
+                                        txt(g,if ru{"Ожидание доставки"}
+                                            else{"Awaiting material delivery"},
+                                            10.0,632.0,12.0,ORANGE);
+                                    }
+                                }
                                 button(g,if ru{"ПРОДОЛЖИТЬ СТРОЙКУ"}
                                     else{"RESUME CONSTRUCTION"},
-                                    8.0,581.0,176.0,35.0,false,true);
+                                    8.0,652.0,176.0,35.0,false,true);
                             }else if obj.object_type==40||obj.object_type==41{
                                 txt(g,if ru{"Хранение: 25 / вид"}
                                     else{"Storage: 25 per good"},
@@ -359,15 +378,15 @@ pub fn click(g:&mut Game,mouse:Vec2,left:bool)->bool{
                     g.selected.build=Some(*ty);
                 }else{
                     g.notify(if g.lang==crate::localization::Language::Russian{
-                        "Постройка недоступна: проверьте ресурсы и ограничения"
-                    }else{"Building unavailable: check stock and limits"});
+                        "Постройка недоступна из-за ограничений"
+                    }else{"Building unavailable: placement restricted"});
                 }
                 return true
             }
         }
     }
     if g.ui.page==HudPage::Selection &&
-        in_rect(local,8.0,581.0,176.0,35.0){
+        in_rect(local,8.0,652.0,176.0,35.0){
         if let Some(site)=g.selected.object{
             let can_resume=g.simulation.entity(site)
                 .is_some_and(|o|o.kind==1&&!o.complete);
