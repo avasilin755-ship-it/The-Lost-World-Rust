@@ -281,7 +281,9 @@ impl WorldArt{
     }
     pub fn get(&mut self,oid:u32)->Option<&SpriteArt>{
         if !self.cache.contains_key(&oid){
-            let image=self.archives.iter()
+            // The Gold loader overwrites base OD definitions with ADDON.OD
+            // by object id. Search the add-on first for matching descriptions.
+            let image=self.archives.iter().rev()
                 .find_map(|archive|archive.art(oid));
             if self.cache.len()>=300{
                 self.cache.clear();
