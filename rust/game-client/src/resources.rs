@@ -401,6 +401,12 @@ impl WorldArt{
         if let Some(p)=addon {archives.push(GdArchive::open(p)?)}
         Ok(Self{archives,cache:HashMap::new(),cache_clock:0})
     }
+    pub fn has_slot(&self,oid:u32,action:u8,facing:u8)->bool{
+        self.archives.iter().rev().any(|archive|
+            archive.od.get(&oid).is_some_and(|obj|obj.kind==0 &&
+                obj.slots.get(action as usize*8+(facing&7) as usize)
+                    .is_some_and(|slot|!slot.is_empty())))
+    }
     pub fn get(&mut self,oid:u32,action:u8,facing:u8)->Option<&SpriteArt>{
         let key=(oid,action.min(4),facing&7);
         self.cache_clock=self.cache_clock.wrapping_add(1);
