@@ -51,7 +51,7 @@ Mission records are ordered by their original numeric index, not file position.
 - Construction: finish the current job before placing another; sites have progress and can be resumed by right-click
 - P: pause and resume simulation
 - F4: minimap
-- F5 / F9: quick save / load a local TLWSNAP3 file (preserves jobs, cargo and facing; TLWSNAP1/2 loads are supported)
+- F5 / F9: quick save / load TLWSNAP6 (units, terrain, economy, porter cargo and unfinished-site stock); legacy TLWSNAP1-5 files remain readable
 - The save path is under the project root in saves/ and ignored by Git
 
 ## How the new Rust modules relate to the original files
@@ -78,7 +78,7 @@ Mission records are ordered by their original numeric index, not file position.
 - Original entity type IDs, sprite names, GD animation and OD anchor offsets
 - Original ODB costs, building footprints, resource definitions
 - Select, move with A*, gather a nature object, deliver one wood to town storage
-- Place a house / town hall / warehouse, build after paying its ODB costs
+- Place a house / town hall / warehouse, request original ODB materials and build as porters deliver them
 - HUD, minimap, keyboard controls and local quick snapshots
 - Build and Rust unit tests on GitHub Actions
 
@@ -299,7 +299,7 @@ counts outdoor own-race units as population; matching original town
 indoor residents/ownership is a remaining migration. Building work
 uses ten-stage, 15-tick/material-sensitive timing approximation rather
 than the earlier flat 100 ticks and increases HP as it progresses.
-It does not yet use original porter-driven material deliveries.
+At the time of the third playtest, porter-driven deliveries had not yet been implemented; see the fourth playtest update below.
 
 **Saves:** TLWSNAP5 stores material/food/luxury fractions and race
 participation in addition to previous terrain and unit state; legacy
@@ -314,3 +314,46 @@ The new frame pacing requires desktop confirmation.
 
 All new functionality is on the same rust-port-foundation branch, not
 a second standalone demo.
+
+
+## Fourth playtest and integrated logistics / terrain-atlas update — 2026-11-16
+
+The 94.57-second Windows recording demonstrates mid-construction
+loading (80% back to 40%), resuming a builder, and completion with full
+HP. In the same video the FPS is 58 at 2.05x but only 34 at 0.50x,
+even though CPU world drawing takes roughly 1.2–2.5 ms.
+
+**Original logistics now implemented as an initial functional slice:**
+each unfinished site has an independent requested-goods list and local
+stock; placing it no longer instantly removes all costs from town goods.
+Idle original porters (type 9) walk to a completed town hall/warehouse,
+take one available good, then carry it to the construction site. The
+town's inventory decrements only at actual pickup. The builder consumes
+one delivered unit at a time in source good-index order, waits when the
+first remaining good is not available, and advances work on its next
+15-tick construction poll. Materials not in stock do not prohibit
+placement; the unfinished site waits for production/delivery. Stock
+limits for completed halls and warehouses now clamp arrivals per good.
+
+**Versioned snapshots:** TLWSNAP6 persists per-site needed/received
+materials and porter pickup/delivery routes. F9 can still read
+TLWSNAP1–5. Older unfinished sites get reconstructed local inventory
+so a pre-logistics save does not deadlock.
+
+**Rendering optimization:** the original opaque 64x64 OS terrain
+frames now share one tightly packed RGBA GPU atlas instead of
+requiring per-variant texture binding. Isometric material blending and
+original coastline frames still select the same images and
+UV orientation. It is expected to improve distant camera performance,
+but the exact gain and visual correctness must be verified on the
+player's GPU (GitHub CI does not render the proprietary local assets).
+
+**Still missing versus the original:** exact porter dispatcher
+priorities and door queues, source-building visits, per-town rather
+than global inventory, site reservations and refund/cancellation
+semantics, multiple simultaneous builders with distinct work phases,
+delivery animations, producer operations and training, native fog and
+territory checks, and fully accurate construction cost scheduling.
+
+See the new [fourth-playtest section](TEST_CHECKLIST.md)
+for the complete next-test protocol.
