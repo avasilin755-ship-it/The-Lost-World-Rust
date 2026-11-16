@@ -17,6 +17,23 @@ pub const MAX_ENTITIES:usize=50_000;
 const NEIGHBOURS:[(i32,i32);8]=[
     (-1,-1),(-1,0),(-1,1),(0,-1),(0,1),(1,-1),(1,0),(1,1)
 ];
+/// Native OD directions are clockwise starting from the back view.
+/// These indexes match MG0..MG7 in the original game archives.
+pub fn facing_for_delta(dx:i32,dy:i32)->Option<u8>{
+    match (dx.signum(),dy.signum()){
+        (-1,-1)=>Some(0),(-1,0)=>Some(1),(-1,1)=>Some(2),
+        (0,1)=>Some(3),(1,1)=>Some(4),(1,0)=>Some(5),
+        (1,-1)=>Some(6),(0,-1)=>Some(7),_=>None,
+    }
+}
+fn wrapped_delta(from:(i32,i32),to:(i32,i32),size:i32)->(i32,i32){
+    let adjust=|mut delta:i32|{
+        if delta>size/2{delta-=size}
+        else if delta < -size/2{delta+=size}
+        delta
+    };
+    (adjust(to.0-from.0),adjust(to.1-from.1))
+}
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub enum Task {
     Idle,
@@ -36,7 +53,7 @@ pub enum After {
 pub struct Entity {
     pub id:u32,pub kind:i32,pub group:i32,pub object_type:i32,pub owner:i32,
     pub x:i32,pub y:i32,pub hp:i32,pub complete:bool,pub construction:u16,
-    pub task:Task,pub carrying:i32,
+    pub task:Task,pub carrying:i32,pub facing:u8,
 }
 #[derive(Debug,Clone)]
 pub struct Simulation {
@@ -76,7 +93,7 @@ impl Simulation {
                 x:obj.x.rem_euclid(terrain.size as i32),
                 y:obj.y.rem_euclid(terrain.size as i32),
                 hp,complete:true,construction:100,
-                task:Task::Idle,carrying:0
+                task:Task::Idle,carrying:0,facing:4
             });
         }
         let next_id=states.len() as u32+1;
@@ -308,7 +325,7 @@ impl Simulation {
         self.objects.push(Entity{
             id,kind:1,group:rule.group,object_type:rule.object_type,
             owner:self.human_race,x:at.0,y:at.1,hp:rule.hp.max(1),
-            complete:false,construction:0,task:Task::Idle,carrying:0
+            complete:false,construction:0,task:Task::Idle,carrying:0,facing:4
         });
         let path=match self.adjacent_to_footprint(
             unit,at,rule.size_x.clamp(1,32),rule.size_y.clamp(1,32)
@@ -397,10 +414,27 @@ impl Simulation {
                     if self.tick%6!=0{continue}
                     if !steps.is_empty(){
                         let (x,y)=steps.remove(0);
+                        let old=(self.objects[i].x,self.objects[i].y);
+                        let delta=wrapped_delta(old,(x,y),self.terrain.size as i32);
+                        if let Some(facing)=facing_for_delta(delta.0,delta.1){
+                            self.objects[i].facing=facing;
+                        }
                         self.objects[i].x=x;
                         self.objects[i].y=y;
                     }
                     if steps.is_empty(){
+                        let target_id=match after{
+                            After::Gather(id)|After::Construct(id)=>Some(id),
+                            _=>None,
+                        };
+                        if let Some(target)=target_id.and_then(|id|self.entity(id)){
+                            let source=(self.objects[i].x,self.objects[i].y);
+                            let delta=wrapped_delta(
+                                source,(target.x,target.y),self.terrain.size as i32);
+                            if let Some(facing)=facing_for_delta(delta.0,delta.1){
+                                self.objects[i].facing=facing;
+                            }
+                        }
                         self.objects[i].task=match after{
                             After::Idle=>Task::Idle,
                             After::Gather(tree)=>Task::Gathering{tree,time:0},
@@ -464,10 +498,10 @@ impl Simulation {
             .map(|o|o.id).collect()
     }
 
-    /// TLWSNAP2 preserves pending jobs, carried goods, construction progress,
-    /// and pause state. TLWSNAP1 remains readable for old local saves.
+    /// TLWSNAP3 additionally stores the unit's last facing direction.
+    /// Both TLWSNAP1 and TLWSNAP2 remain readable.
     pub fn save_snapshot(&self)->Vec<u8>{
-        let mut b=b"TLWSNAP2".to_vec();
+        let mut b=b"TLWSNAP3".to_vec();
         b.extend_from_slice(&self.tick.to_le_bytes());
         b.push(u8::from(self.paused));
         b.extend_from_slice(&self.gold.to_le_bytes());
@@ -482,6 +516,7 @@ impl Simulation {
             b.push(u8::from(o.complete));
             b.extend_from_slice(&o.construction.to_le_bytes());
             b.extend_from_slice(&o.carrying.to_le_bytes());
+            b.push(o.facing);
             match &o.task{
                 Task::Idle=>b.push(0),
                 Task::Walking{steps,after}=>{
@@ -539,7 +574,8 @@ impl Simulation {
             return Err(GameError::Invalid("invalid snapshot header"))
         }
         let legacy=&b[..8]==b"TLWSNAP1";
-        if !legacy&&&b[..8]!=b"TLWSNAP2"{
+        let version3=&b[..8]==b"TLWSNAP3";
+        if !legacy && !version3 && &b[..8]!=b"TLWSNAP2"{
             return Err(GameError::Invalid("invalid snapshot header"))
         }
         let mut pos=8usize;
@@ -574,6 +610,8 @@ impl Simulation {
                 i32::from_le_bytes(take(4)?.try_into().unwrap())
             };
             if carrying<0{return Err(GameError::Invalid("negative carried goods"))}
+            let facing=if version3 {take(1)?[0]} else {4};
+            if facing>=8{return Err(GameError::Invalid("invalid facing direction"))}
             let task=if legacy{Task::Idle}else{
                 let tag=take(1)?[0];
                 match tag{
@@ -640,7 +678,7 @@ impl Simulation {
             objects.push(Entity{
                 id,kind:values[0],group:values[1],object_type:values[2],
                 owner:values[3],x:values[4],y:values[5],hp:values[6],
-                complete,construction,task,carrying
+                complete,construction,task,carrying,facing
             });
         }
         if pos!=b.len()||next_id<=ids.iter().copied().max().unwrap_or(0){
@@ -695,7 +733,7 @@ mod tests{
         sim.objects.push(Entity{
             id:storage,kind:1,group:2,object_type:40,owner:2,
             x:9,y:10,hp:100,complete:true,construction:100,
-            task:Task::Idle,carrying:0
+            task:Task::Idle,carrying:0,facing:4
         });
         for _ in 0..180{sim.step()}
         assert_eq!(sim.goods[1],1);
@@ -758,6 +796,30 @@ mod tests{
         assert_eq!(sim.entity(1).unwrap().carrying,0);
         assert_eq!(sim.entity(1).unwrap().task,Task::Idle);
         assert_eq!(sim.goods[GOOD_WOOD],0);
+    }
+    #[test]
+    fn facing_uses_original_eight_directions_and_survives_snapshot(){
+        assert_eq!(facing_for_delta(-1,-1),Some(0));
+        assert_eq!(facing_for_delta(-1,0),Some(1));
+        assert_eq!(facing_for_delta(-1,1),Some(2));
+        assert_eq!(facing_for_delta(0,1),Some(3));
+        assert_eq!(facing_for_delta(1,1),Some(4));
+        assert_eq!(facing_for_delta(1,0),Some(5));
+        assert_eq!(facing_for_delta(1,-1),Some(6));
+        assert_eq!(facing_for_delta(0,-1),Some(7));
+        assert_eq!(facing_for_delta(0,0),None);
+        assert_eq!(wrapped_delta((0,0),(127,0),128),(-1,0));
+        let mut sim=setup();
+        sim.order_move(1,(11,10)).unwrap();
+        for _ in 0..6{sim.step()}
+        assert_eq!(sim.entity(1).unwrap().facing,5);
+        let bytes=sim.save_snapshot();
+        let mut loaded=setup();
+        loaded.load_snapshot(&bytes).unwrap();
+        assert_eq!(loaded.entity(1).unwrap().facing,5);
+        sim.order_move(1,(11,11)).unwrap();
+        for _ in 0..6{sim.step()}
+        assert_eq!(sim.entity(1).unwrap().facing,3);
     }
     #[test]
     fn snapshot_preserves_active_gather_task(){

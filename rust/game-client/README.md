@@ -43,7 +43,7 @@ Mission records are ordered by their original numeric index, not file position.
 - Construction: finish the current job before placing another; sites have progress and can be resumed by right-click
 - P: pause and resume simulation
 - F4: minimap
-- F5 / F9: quick save / load a local TLWSNAP2 file (restores jobs and cargo; TLWSNAP1 loads are supported)
+- F5 / F9: quick save / load a local TLWSNAP3 file (preserves jobs, cargo and facing; TLWSNAP1/2 loads are supported)
 - The save path is under the project root in saves/ and ignored by Git
 
 ## How the new Rust modules relate to the original files
@@ -119,3 +119,27 @@ Keep the original GD/OD/OS/MDB/DVM/ODB files outside the repository.
   limited to one Town Hall to prevent unlimited free Town Hall placement.
 - The renderer and simulation have automated regression tests. The exact
   appearance with the original external GD/OD assets must be verified locally.
+
+## Directional units and nature sprite state (2026-11-16)
+
+The original OD kind-0 record has 40 slots (five actions × eight facings).
+The client now resolves **slot = action × 8 + facing** for each visible
+unit, using the exact native direction mapping. Current facing survives
+movement completion, pauses, and TLWSNAP3 save/load. Walk (MG), work (WO)
+and carry (CA) select distinct animations, falling back to the matching
+walk direction if the requested action has no dedicated sprite.
+
+The original nature records deliberately have multiple actions:
+- Tree (ODB class 8): **CA0** (slot 32) is the intact standing tree.
+  Slot 0 is not the correct initial state for this object.
+- Berry bush (class 9) and stone (class 13): **MS0**, frame 0 initially.
+- Growing resources (classes 10–12): **ST0**.
+- Buildings: unfinished **BU0** and completed **MS0**.
+
+Only a gathering unit advances the resource depletion frames. A building
+construction stage advances with actual construction progress. The
+sprite cache is indexed by ID, action and facing rather than ID alone.
+
+CI verifies the Rust implementation, but the external original GD/OD
+archives are not included in the repository. Visual appearance of each
+race and nature type needs a real client check with those assets.

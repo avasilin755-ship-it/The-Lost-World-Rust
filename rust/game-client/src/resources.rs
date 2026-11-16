@@ -233,12 +233,15 @@ impl GdArchive{
             (entry.left-anchor.x) as f32,(entry.top-anchor.y) as f32
         )})
     }
-    fn art(&self,id:u32)->Option<SpriteArt>{
+    fn art(&self,id:u32,action:u8,facing:u8)->Option<SpriteArt>{
         let object=self.od.get(&id)?;
-        let preferred=if object.kind==1{1}else{0};
-        let slot=object.slots.get(preferred)
-            .filter(|s|!s.is_empty())
-            .or_else(||object.slots.iter().find(|s|!s.is_empty()))?;
+        // The OD kind-0 table stores five actions, each with eight
+        // directions: MG (0), ST (1), WO (2), ID (3), CA (4).
+        // Building kind 1 has BU in slot 0 and MS in slot 1.
+        let candidates=slot_candidates(object.kind,action,facing);
+        let slot=candidates.iter().find_map(|&index|
+            object.slots.get(index).filter(|slot|!slot.is_empty())
+        )?;
         let mut layers=Vec::new();
         for layer in slot.iter().take(6){
             if let Ok(img)=self.sprite(&layer.name,object.anchor){
@@ -248,6 +251,37 @@ impl GdArchive{
         if layers.is_empty(){None}else{Some(SpriteArt{layers})}
     }
 }
+/// Native nature starting animation action, from ODB class/product.
+/// Trees MUST show CA0 (a standing tree), rather than MS0 (felled).
+/// The first frame of bushes and stone MS0 is their intact stage.
+pub fn nature_initial_action(class:i32,product:i32)->u8{
+    match class{
+        8=>4,        // standing tree (CA0)
+        9|13=>0,     // berry bushes and stone (MS0)
+        10..=12=>1,  // growing crops / mushrooms (ST0)
+        _=>match product{
+            0=>1,1=>4,_=>0
+        },
+    }
+}
+
+/// Return a prioritized list of descriptor indices for this object state.
+/// Prefer an exact facing; fall back to the same action's direction zero,
+/// then to walking in the same facing, never to a random nonempty action.
+fn slot_candidates(kind:u32,action:u8,facing:u8)->[usize;4]{
+    match kind{
+        0=>{
+            let direction=(facing&7) as usize;
+            let base=(action.min(4) as usize)*8;
+            [base+direction,base,direction,0]
+        },
+        1=>{
+            let index=usize::from(action!=0);
+            [index,index,0,0]
+        },
+        _=>[0;4]
+    }
+}
 pub struct Layer {
     textures:Vec<Texture2D>,
     offset:Vec2,
@@ -255,7 +289,7 @@ pub struct Layer {
 /// Animation frames are driven by simulation state, never by global wall time.
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
 pub enum SpriteMotion{
-    /// Trees, bushes, rocks, idle workers and complete buildings stay on frame 0.
+    /// Idle units and untouched resources freeze at the initial stage.
     Still,
     /// Active units use a repeating walk/work cycle.
     Loop(u64),
@@ -295,7 +329,7 @@ impl SpriteArt {
 
 pub struct WorldArt {
     archives:Vec<GdArchive>,
-    cache:HashMap<u32,Option<SpriteArt>>,
+    cache:HashMap<(u32,u8,u8),Option<SpriteArt>>,
 }
 impl WorldArt{
     pub fn open(base:PathBuf,addon:Option<PathBuf>)->Result<Self,String>{
@@ -303,23 +337,45 @@ impl WorldArt{
         if let Some(p)=addon {archives.push(GdArchive::open(p)?)}
         Ok(Self{archives,cache:HashMap::new()})
     }
-    pub fn get(&mut self,oid:u32)->Option<&SpriteArt>{
-        if !self.cache.contains_key(&oid){
-            // The Gold loader overwrites base OD definitions with ADDON.OD
-            // by object id. Search the add-on first for matching descriptions.
+    pub fn get(&mut self,oid:u32,action:u8,facing:u8)->Option<&SpriteArt>{
+        let key=(oid,action.min(4),facing&7);
+        if !self.cache.contains_key(&key){
+            // Each direction/action has its own original GD sprite.
+            // ADDON.OD overrides the base descriptors on matching IDs.
             let image=self.archives.iter().rev()
-                .find_map(|archive|archive.art(oid));
-            if self.cache.len()>=300{
+                .find_map(|archive|archive.art(oid,key.1,key.2));
+            if self.cache.len()>=768{
                 self.cache.clear();
             }
-            self.cache.insert(oid,image);
+            self.cache.insert(key,image);
         }
-        self.cache.get(&oid).and_then(|s|s.as_ref())
+        self.cache.get(&key).and_then(|s|s.as_ref())
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn nature_uses_original_intact_resource_animation_slot(){
+        assert_eq!(nature_initial_action(8,1),4); // standing tree CA0
+        assert_eq!(nature_initial_action(9,2),0); // berries MS0
+        assert_eq!(nature_initial_action(13,2),0); // rock MS0
+        assert_eq!(nature_initial_action(10,0),1); // crop ST0
+        assert_eq!(nature_initial_action(0,1),4); // ODB product fallback
+        assert_eq!(nature_initial_action(0,-1),0);
+    }
+    #[test]
+    fn original_od_action_direction_indexing(){
+        // Eight facing rows per action in the native OD kind-0 table.
+        assert_eq!(slot_candidates(0,0,0),[0,0,0,0]);
+        assert_eq!(slot_candidates(0,0,6),[6,0,6,0]);
+        assert_eq!(slot_candidates(0,2,5),[21,16,5,0]);
+        assert_eq!(slot_candidates(0,4,0),[32,32,0,0]); // standing tree
+        assert_eq!(slot_candidates(0,4,7),[39,32,7,0]);
+        assert_eq!(slot_candidates(1,0,3),[0,0,0,0]); // construction BU
+        assert_eq!(slot_candidates(1,1,3),[1,1,0,0]); // completed MS
+        assert_eq!(slot_candidates(2,4,7),[0,0,0,0]);
+    }
     #[test]
     fn idle_resource_never_cycles_through_death_frames(){
         for count in 1..=16{
