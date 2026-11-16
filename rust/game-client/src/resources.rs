@@ -202,16 +202,18 @@ impl GdArchive{
             od:od.objects.into_iter().map(|e|(e.id,e)).collect()
         })
     }
-    fn sprite(&self,name:&str,anchor:OdAnchor)->Result<Layer,String>{
+    fn sprite(&self,name:&str,anchor:OdAnchor,flags:u32,speed:i32)->Result<Layer,String>{
         let entry=self.gd.get(name).ok_or_else(||format!("Missing GD sprite {name}"))?;
         if entry.frames==0||entry.frames>128||entry.width>4096||entry.height>4096
             ||entry.data_length>64*1024*1024||entry.data_length==0 {
             return Err(format!("Unsupported sprite shape: {name}"))
         }
-        let frame_limit=entry.frames.min(12);
+        // Use the real animation sequence, rather than truncating every row
+        // after the twelfth frame (some original units use longer rows).
+        let frame_limit=entry.frames.min(32);
         if entry.width.checked_mul(entry.height)
             .and_then(|v|v.checked_mul(frame_limit))
-            .and_then(|v|v.checked_mul(4)).unwrap_or(usize::MAX)>32*1024*1024 {
+            .and_then(|v|v.checked_mul(4)).unwrap_or(usize::MAX)>48*1024*1024 {
             return Err("Sprite exceeds texture budget".into())
         }
         let mut file=File::open(&self.path).map_err(|e|e.to_string())?;
@@ -221,6 +223,16 @@ impl GdArchive{
         file.read_exact(&mut bytes).map_err(|e|e.to_string())?;
         let rgba=decode_gd_frames(entry,&bytes,Some(frame_limit-1),OpacityMode::Preserve)
             .map_err(|e|e.to_string())?;
+        // First-frame 1-bit alpha mask for original-style pixel-precise
+        // mouse hit tests, stored at 1/8 the size of a byte alpha plane.
+        let width=entry.width as usize;
+        let height=entry.height as usize;
+        let mut alpha_bits=vec![0u64;(width*height+63)/64];
+        if let Some(first)=rgba.first(){
+            for (i,pixel) in first.chunks_exact(4).enumerate(){
+                if pixel[3]>192{alpha_bits[i/64]|=1u64<<(i%64)}
+            }
+        }
         let mut textures=Vec::with_capacity(rgba.len());
         for data in rgba{
             let texture=Texture2D::from_rgba8(
@@ -231,7 +243,7 @@ impl GdArchive{
         }
         Ok(Layer{textures,offset:vec2(
             (entry.left-anchor.x) as f32,(entry.top-anchor.y) as f32
-        )})
+        ),alpha_bits,width,height,flags,speed})
     }
     fn art(&self,id:u32,action:u8,facing:u8)->Option<SpriteArt>{
         let object=self.od.get(&id)?;
@@ -244,7 +256,7 @@ impl GdArchive{
         )?;
         let mut layers=Vec::new();
         for layer in slot.iter().take(6){
-            if let Ok(img)=self.sprite(&layer.name,object.anchor){
+            if let Ok(img)=self.sprite(&layer.name,object.anchor,layer.flags,layer.speed){
                 layers.push(img);
             }
         }
@@ -285,6 +297,41 @@ fn slot_candidates(kind:u32,action:u8,facing:u8)->[usize;4]{
 pub struct Layer {
     textures:Vec<Texture2D>,
     offset:Vec2,
+    alpha_bits:Vec<u64>,
+    width:usize,
+    height:usize,
+    flags:u32,
+    speed:i32,
+}
+impl Layer{
+    fn hit(&self,anchor:Vec2,zoom:f32,pixel:Vec2)->bool{
+        if zoom<=0.0 || self.width==0{return false}
+        let local=(pixel-anchor-self.offset*zoom)/zoom;
+        let x=local.x.floor() as i32;
+        let y=local.y.floor() as i32;
+        if x<0||y<0||x>=self.width as i32||y>=self.height as i32{return false}
+        let index=y as usize*self.width+x as usize;
+        self.alpha_bits.get(index/64).is_some_and(|b|b&(1u64<<(index%64))!=0)
+    }
+}
+/// Independent, stable animation timing per object and OD layer. The
+/// first frame does not move until that layer's own ambient interval.
+fn ambient_frame(id:u32,layer_index:usize,tick:u64,count:usize,speed:i32,flags:u32)->usize{
+    if count<=1{return 0}
+    let cycle=90+((id as u64*73+layer_index as u64*31)%180);
+    let phase=(tick+id as u64*17+layer_index as u64*47)%cycle;
+    let ticks_per_frame=(10/speed.max(1) as u64).max(1);
+    let motion=if flags&1!=0{
+        count.saturating_sub(1)*2
+    }else{count};
+    let idx=(phase/ticks_per_frame) as usize;
+    if flags&2!=0 && idx>=motion{
+        if flags&1!=0{0}else{count-1}
+    }else if idx>=motion{
+        0
+    }else if flags&1!=0 && idx>=count{
+        motion.saturating_sub(idx)
+    }else{idx.min(count-1)}
 }
 /// Animation frames are driven by simulation state, never by global wall time.
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
@@ -312,11 +359,27 @@ impl SpriteMotion{
 }
 pub struct SpriteArt {layers:Vec<Layer>}
 impl SpriteArt {
-    pub fn draw(&self,screen:Vec2,zoom:f32,motion:SpriteMotion,tint:Color){
-        for layer in &self.layers{
+    pub fn hit(&self,anchor:Vec2,zoom:f32,pixel:Vec2)->bool{
+        // Every original layer participates in hit testing (including the door).
+        self.layers.iter().any(|layer|layer.hit(anchor,zoom,pixel))
+    }
+    pub fn draw(&self,screen:Vec2,zoom:f32,motion:SpriteMotion,tint:Color,
+        entity_id:u32,tick:u64,ambient_enabled:bool,work_active:bool){
+        for (index,layer) in self.layers.iter().enumerate(){
             let n=layer.textures.len();
             if n==0{continue}
-            let t=&layer.textures[motion.frame(n)];
+            let frame=if index==0{
+                motion.frame(n)
+            }else if layer.flags&0x10!=0{
+                0 // door: wait for a real enter/leave event
+            }else if layer.flags&0x20!=0{
+                if work_active{SpriteMotion::Loop(tick).frame(n)}else{0}
+            }else if layer.flags&0x40!=0{
+                if ambient_enabled{
+                    ambient_frame(entity_id,index,tick,n,layer.speed,layer.flags)
+                }else{0}
+            }else{0};
+            let t=&layer.textures[frame];
             let pos=screen+layer.offset*zoom;
             draw_texture_ex(t,pos.x.floor(),pos.y.floor(),tint,
                 DrawTextureParams{
@@ -329,32 +392,53 @@ impl SpriteArt {
 
 pub struct WorldArt {
     archives:Vec<GdArchive>,
-    cache:HashMap<(u32,u8,u8),Option<SpriteArt>>,
+    cache:HashMap<(u32,u8,u8),(Option<SpriteArt>,u64)>,
+    cache_clock:u64,
 }
 impl WorldArt{
     pub fn open(base:PathBuf,addon:Option<PathBuf>)->Result<Self,String>{
         let mut archives=vec![GdArchive::open(base)?];
         if let Some(p)=addon {archives.push(GdArchive::open(p)?)}
-        Ok(Self{archives,cache:HashMap::new()})
+        Ok(Self{archives,cache:HashMap::new(),cache_clock:0})
     }
     pub fn get(&mut self,oid:u32,action:u8,facing:u8)->Option<&SpriteArt>{
         let key=(oid,action.min(4),facing&7);
+        self.cache_clock=self.cache_clock.wrapping_add(1);
         if !self.cache.contains_key(&key){
-            // Each direction/action has its own original GD sprite.
-            // ADDON.OD overrides the base descriptors on matching IDs.
+            // LRU eviction preserves nearby/hot sprite directions instead of
+            // clearing the entire GPU cache when the limit is reached.
+            if self.cache.len()>=512{
+                if let Some(old)=self.cache.iter().min_by_key(|(_,(_,stamp))|*stamp)
+                    .map(|(key,_)|*key){
+                    self.cache.remove(&old);
+                }
+            }
             let image=self.archives.iter().rev()
                 .find_map(|archive|archive.art(oid,key.1,key.2));
-            if self.cache.len()>=768{
-                self.cache.clear();
-            }
-            self.cache.insert(key,image);
+            self.cache.insert(key,(image,self.cache_clock));
         }
-        self.cache.get(&key).and_then(|s|s.as_ref())
+        if let Some((_,stamp))=self.cache.get_mut(&key){
+            *stamp=self.cache_clock;
+        }
+        self.cache.get(&key).and_then(|(art,_)|art.as_ref())
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mask_and_ambient_animation_regressions(){
+        let layer=Layer{
+            textures:Vec::new(),offset:vec2(-2.0,-3.0),
+            alpha_bits:vec![1u64<<5],width:4,height:4,flags:0,speed:7
+        };
+        assert!(layer.hit(vec2(100.0,100.0),1.0,vec2(99.0,98.0)));
+        assert!(!layer.hit(vec2(100.0,100.0),1.0,vec2(98.0,98.0)));
+        assert!(!layer.hit(vec2(100.0,100.0),1.0,vec2(200.0,200.0)));
+        for tick in 0..100{
+            assert!(ambient_frame(100,1,tick,12,7,0x42)<12);
+        }
+    }
     #[test]
     fn nature_uses_original_intact_resource_animation_slot(){
         assert_eq!(nature_initial_action(8,1),4); // standing tree CA0
