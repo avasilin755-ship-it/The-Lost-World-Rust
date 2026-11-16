@@ -41,3 +41,5 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Compile standalone Macroquad viewer
         run: cargo check --manifest-path rust/sprite-viewer/Cargo.toml --all-targets
+      - name: Test standalone Macroquad viewer
+        run: cargo test --manifest-path rust/sprite-viewer/Cargo.toml --all-targets
