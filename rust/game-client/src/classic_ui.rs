@@ -185,6 +185,15 @@ pub fn draw(g:&Game){
                 if ru{"Жителей"}else{"Units"},
                 g.simulation.selected_unit_ids().len()),
                 13.0,540.0,13.0,WHITE);
+            let capacity=game_core::economy::storage_capacity(
+                g.simulation.objects.iter().filter(|o|o.kind==1)
+                    .map(|o|(o.group,o.object_type,o.complete)),
+                g.simulation.human_race
+            );
+            txt(g,&format!("{}: {} / {}",
+                if ru{"Склад"}else{"Storage"},
+                capacity,if ru{"вид"}else{"good"}),
+                13.0,566.0,12.0,GOLD);
         }
         HudPage::Build=>{
             txt(g,if ru{"СТРОИТЕЛЬСТВО"}else{"BUILDINGS"},
