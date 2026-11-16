@@ -30,4 +30,4 @@ jobs:
       - name: Check all Rust targets (including examples)
         run: cargo check --workspace --all-targets --locked
       - name: Run Rust workspace tests
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --all-targets --locked
