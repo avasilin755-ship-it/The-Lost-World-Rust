@@ -425,6 +425,9 @@ impl Simulation {
     /// Resume an unfinished building without charging its materials again.
     pub fn order_construct(&mut self,unit:u32,site:u32)->Result<(),GameError>{
         if !self.unit_owned(unit){return Err(GameError::NotOwned)}
+        if self.entity(unit).is_some_and(|o|o.object_type!=11){
+            return Err(GameError::WrongWorker)
+        }
         if !matches!(self.entity(unit).unwrap().task,Task::Idle){
             return Err(GameError::Busy)
         }
@@ -988,6 +991,20 @@ mod tests{
         assert_eq!(restored.entity(site).unwrap().construction,100);
         assert_eq!(restored.can_build(1,rule_id(2,37),(25,25)),Err(GameError::Occupied));
         assert_eq!(restored.can_build(1,rule_id(2,37),(30,30)),Err(GameError::NotEnoughGoods));
+    }
+    #[test]
+    fn only_original_builder_profession_can_place_buildings(){
+        let mut sim=setup();
+        sim.rules.insert(rule_id(2,37),house_rule(37));
+        sim.goods[GOOD_WOOD]=3;
+        sim.goods[GOOD_STONE]=2;
+        assert_eq!(
+            sim.build(1,rule_id(2,37),(25,25)),
+            Err(GameError::WrongWorker)
+        );
+        sim.entity_mut(1).unwrap().object_type=11;
+        let site=sim.build(1,rule_id(2,37),(25,25)).unwrap();
+        assert!(sim.entity(site).unwrap().hp<200);
     }
     #[test]
     fn duplicate_town_halls_are_blocked_until_settlements_are_supported(){
