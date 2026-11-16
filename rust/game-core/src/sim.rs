@@ -1304,6 +1304,65 @@ mod tests{
         assert!(!sim.sites.contains_key(&site));
     }
     #[test]
+    fn tlwsnap6_restores_porter_in_flight_and_site_inventory(){
+        let mut sim=setup();
+        sim.entity_mut(1).unwrap().object_type=11;
+        let mut rule=house_rule(37);
+        rule.cost=[0;9];
+        rule.cost[GOOD_WOOD]=1;
+        sim.rules.insert(rule_id(2,37),rule);
+        let storage=sim.next_id;sim.next_id+=1;
+        sim.objects.push(Entity{
+            id:storage,kind:1,group:2,object_type:40,owner:2,
+            x:8,y:10,hp:100,complete:true,construction:100,
+            task:Task::Idle,carrying:0,facing:4
+        });
+        let porter=sim.next_id;sim.next_id+=1;
+        sim.objects.push(Entity{
+            id:porter,kind:0,group:2,object_type:9,owner:2,
+            x:7,y:10,hp:100,complete:true,construction:100,
+            task:Task::Idle,carrying:0,facing:4
+        });
+        sim.goods[GOOD_WOOD]=1;
+        let site=sim.build(1,rule_id(2,37),(17,17)).unwrap();
+        // At tick 15, the porter has received a request to visit storage.
+        for _ in 0..15{sim.step()}
+        assert!(matches!(sim.entity(porter).unwrap().task,
+            Task::Walking{after:After::Fetch(..),..}));
+        let saved=sim.save_snapshot();
+        assert!(saved.starts_with(b"TLWSNAP6"));
+        let mut restored=setup();
+        restored.rules=sim.rules.clone();
+        restored.load_snapshot(&saved).unwrap();
+        assert_eq!(restored.entity(porter).unwrap().task,
+            sim.entity(porter).unwrap().task);
+        assert_eq!(restored.sites.get(&site),sim.sites.get(&site));
+        for _ in 0..1200{
+            restored.step();
+            if restored.entity(site).unwrap().complete{break}
+        }
+        assert!(restored.entity(site).unwrap().complete);
+        assert_eq!(restored.goods[GOOD_WOOD],0);
+    }
+    #[test]
+    fn storage_clamps_transported_goods_to_original_capacity(){
+        let mut sim=setup();
+        let store=sim.next_id;sim.next_id+=1;
+        sim.objects.push(Entity{
+            id:store,kind:1,group:2,object_type:40,owner:2,
+            x:9,y:10,hp:100,complete:true,construction:100,
+            task:Task::Idle,carrying:0,facing:4
+        });
+        sim.goods[GOOD_WOOD]=24;
+        sim.entity_mut(1).unwrap().task=Task::Delivering{
+            storage:store,good:GOOD_WOOD,amount:3
+        };
+        sim.entity_mut(1).unwrap().carrying=3;
+        sim.step();
+        assert_eq!(sim.goods[GOOD_WOOD],25);
+        assert_eq!(sim.entity(1).unwrap().carrying,0);
+    }
+    #[test]
     fn only_original_builder_profession_can_place_buildings(){
         let mut sim=setup();
         sim.rules.insert(rule_id(2,37),house_rule(37));
