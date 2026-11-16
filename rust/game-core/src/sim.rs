@@ -24,10 +24,13 @@ pub enum Task {
     Gathering{tree:u32,time:u16},
     Delivering{storage:u32,good:usize,amount:i32},
     Constructing{site:u32},
+    /// Carrying resources until a completed warehouse becomes reachable.
+    Holding{good:usize,amount:i32},
 }
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
 pub enum After {
     Idle, Gather(u32), Deliver(u32,usize,i32), Construct(u32),
+    Hold(usize,i32),
 }
 #[derive(Debug,Clone)]
 pub struct Entity {
@@ -49,7 +52,8 @@ pub struct Simulation {
 }
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub enum GameError{
-    Invalid(&'static str),NoPath,MissingObject,NotOwned,NotEnoughGoods,Occupied,NotLand
+    Invalid(&'static str),NoPath,MissingObject,NotOwned,NotEnoughGoods,Occupied,NotLand,
+    Busy,TownHallExists,TooManyEntities
 }
 impl std::fmt::Display for GameError{
     fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result{write!(f,"{self:?}")}
@@ -189,7 +193,16 @@ impl Simulation {
         if !self.unit_owned(unit){return Err(GameError::NotOwned)}
         let source=self.entity(unit).ok_or(GameError::MissingObject)?;
         let path=self.find_path((source.x,source.y),target,Some(unit))?;
-        self.entity_mut(unit).unwrap().task=Task::Walking{steps:path,after:After::Idle};
+        // A manual move must not silently erase a load of undelivered goods.
+        let after=match &source.task{
+            Task::Holding{good,amount}|Task::Delivering{good,amount,..}
+                =>After::Hold(*good,*amount),
+            Task::Walking{after:After::Deliver(_,good,amount),..}
+            |Task::Walking{after:After::Hold(good,amount),..}
+                =>After::Hold(*good,*amount),
+            _=>After::Idle,
+        };
+        self.entity_mut(unit).unwrap().task=Task::Walking{steps:path,after};
         Ok(())
     }
     pub fn order_gather(&mut self,unit:u32,tree:u32)->Result<(),GameError>{
@@ -199,6 +212,9 @@ impl Simulation {
         if self.harvest_yield(tree).is_none(){
             return Err(GameError::Invalid("this nature object is not a gatherable resource"))
         }
+        if self.entity(unit).is_some_and(|o|o.carrying>0){
+            return Err(GameError::Busy)
+        }
         let at=(target.x,target.y);
         let path=self.nearest_adjacent(unit,at)?;
         self.entity_mut(unit).unwrap().task=Task::Walking{
@@ -206,18 +222,29 @@ impl Simulation {
         };
         Ok(())
     }
-    pub fn build(&mut self,unit:u32,rule_id:u32,at:(i32,i32))->Result<u32,GameError>{
+    /// Validate the whole footprint and real ODB inventory before allowing a site.
+    /// A provisional one-town-hall rule prevents infinite free town-hall spam
+    /// until settlement founding is implemented.
+    pub fn can_build(&self,unit:u32,rule_id:u32,at:(i32,i32))->Result<(),GameError>{
         if !self.unit_owned(unit){return Err(GameError::NotOwned)}
+        if !matches!(self.entity(unit).unwrap().task,Task::Idle){
+            return Err(GameError::Busy)
+        }
         let rule=self.rules.get(&rule_id).ok_or(GameError::Invalid("unknown building rule"))?;
         if rule.kind!=1||rule.group!=self.human_race{
             return Err(GameError::Invalid("not a building of the selected race"))
         }
-        let size_x=rule.size_x.clamp(1,32);
-        let size_y=rule.size_y.clamp(1,32);
-        for dx in 0..size_x{
-            for dy in 0..size_y{
+        if self.objects.len()>=MAX_ENTITIES{return Err(GameError::TooManyEntities)}
+        if rule.object_type==40 && self.objects.iter().any(|o|
+            o.kind==1 && o.group==self.human_race && o.object_type==40){
+            return Err(GameError::TownHallExists)
+        }
+        let n=self.terrain.size as i32;
+        for dx in 0..rule.size_x.clamp(1,32){
+            for dy in 0..rule.size_y.clamp(1,32){
                 let x=at.0-dx;
                 let y=at.1-dy;
+                if x<0||y<0||x>=n||y>=n{return Err(GameError::NotLand)}
                 if self.terrain.water(x,y){return Err(GameError::NotLand)}
                 if self.objects.iter().any(|o|self.in_footprint(o,x,y)){
                     return Err(GameError::Occupied)
@@ -225,27 +252,90 @@ impl Simulation {
             }
         }
         for (i,cost) in rule.cost.iter().enumerate(){
-            if *cost>self.goods[i] {return Err(GameError::NotEnoughGoods)}
+            if (*cost).max(0)>self.goods[i]{return Err(GameError::NotEnoughGoods)}
         }
-        let path=self.nearest_adjacent(unit,at)?;
-        for (i,cost) in rule.cost.iter().enumerate(){
-            self.goods[i]-=*cost
+        Ok(())
+    }
+    /// Find a reachable work cell outside an entire building footprint,
+    /// not merely adjacent to its often-blocked bottom-right anchor.
+    fn adjacent_to_footprint(
+        &self,unit:u32,at:(i32,i32),sx:i32,sy:i32
+    )->Result<Vec<(i32,i32)>,GameError>{
+        let source=self.entity(unit).ok_or(GameError::MissingObject)?;
+        let n=self.terrain.size as i32;
+        let mut candidates=HashSet::new();
+        for dx in 0..sx {
+            for dy in 0..sy {
+                if dx!=0 && dy!=0 && dx!=sx-1 && dy!=sy-1{continue}
+                for &(ox,oy) in &NEIGHBOURS {
+                    let px=at.0-dx+ox;
+                    let py=at.1-dy+oy;
+                    if px<0||py<0||px>=n||py>=n{continue}
+                    if at.0-px>=0 && at.0-px<sx
+                        && at.1-py>=0 && at.1-py<sy{continue}
+                    if !self.blocked(px,py,Some(unit)){
+                        candidates.insert((px,py));
+                    }
+                }
+            }
         }
+        let mut candidates:Vec<_>=candidates.into_iter().collect();
+        candidates.sort_by_key(|&goal|self.distance_heuristic(source.x,source.y,goal));
+        for goal in candidates{
+            if let Ok(path)=self.find_path((source.x,source.y),goal,Some(unit)){
+                return Ok(path)
+            }
+        }
+        Err(GameError::NoPath)
+    }
+    pub fn build(&mut self,unit:u32,rule_id:u32,at:(i32,i32))->Result<u32,GameError>{
+        self.can_build(unit,rule_id,at)?;
+        let rule=self.rules.get(&rule_id).unwrap().clone();
+        // The site must exist during A* so the route cannot cut through it.
         let id=self.next_id;
-        self.next_id+=1;
         self.objects.push(Entity{
             id,kind:1,group:rule.group,object_type:rule.object_type,
             owner:self.human_race,x:at.0,y:at.1,hp:rule.hp.max(1),
             complete:false,construction:0,task:Task::Idle,carrying:0
         });
+        let path=match self.adjacent_to_footprint(
+            unit,at,rule.size_x.clamp(1,32),rule.size_y.clamp(1,32)
+        ){
+            Ok(path)=>path,
+            Err(error)=>{self.objects.pop();return Err(error)}
+        };
+        // Debit only after the placement and worker route are both valid.
+        for (i,cost) in rule.cost.iter().enumerate(){
+            self.goods[i]-=(*cost).max(0);
+        }
+        self.next_id+=1;
         self.entity_mut(unit).unwrap().task=Task::Walking{
             steps:path,after:After::Construct(id)
         };
         Ok(id)
     }
+    /// Resume an unfinished building without charging its materials again.
+    pub fn order_construct(&mut self,unit:u32,site:u32)->Result<(),GameError>{
+        if !self.unit_owned(unit){return Err(GameError::NotOwned)}
+        if !matches!(self.entity(unit).unwrap().task,Task::Idle){
+            return Err(GameError::Busy)
+        }
+        let target=self.entity(site).ok_or(GameError::MissingObject)?;
+        if target.kind!=1 || target.group!=self.human_race || target.complete{
+            return Err(GameError::Invalid("not an unfinished owned building"))
+        }
+        let rule=self.rule(target).ok_or(GameError::Invalid("missing building rule"))?;
+        let at=(target.x,target.y);
+        let size=(rule.size_x.clamp(1,32),rule.size_y.clamp(1,32));
+        let path=self.adjacent_to_footprint(unit,at,size.0,size.1)?;
+        self.entity_mut(unit).unwrap().task=Task::Walking{
+            steps:path,after:After::Construct(site)
+        };
+        Ok(())
+    }
     fn nearest_storage(&self,from:(i32,i32))->Option<u32>{
         self.objects.iter().filter(|o|{
-            o.kind==1 && o.group==self.human_race
+            o.kind==1 && o.group==self.human_race && o.complete
                 &&(o.object_type==40||o.object_type==41)
         }).min_by_key(|o|self.distance_heuristic(from.0,from.1,(o.x,o.y)))
             .map(|o|o.id)
@@ -266,7 +356,8 @@ impl Simulation {
         let from=self.entity(unit).map(|o|(o.x,o.y));
         let Some(from)=from else{return};
         let Some(storage)=self.nearest_storage(from) else{
-            self.goods[good]=self.goods[good].saturating_add(amount);return;
+            self.entity_mut(unit).unwrap().task=Task::Holding{good,amount};
+            return;
         };
         let Some(to)=self.entity(storage).map(|o|(o.x,o.y)) else{return};
         if let Ok(path)=self.nearest_adjacent(unit,to) {
@@ -274,7 +365,7 @@ impl Simulation {
                 steps:path,after:After::Deliver(storage,good,amount)
             };
         } else {
-            self.goods[good]=self.goods[good].saturating_add(amount);
+            self.entity_mut(unit).unwrap().task=Task::Holding{good,amount};
         }
     }
     /// Deterministic fixed-time simulation. Path speed is temporarily
@@ -303,20 +394,22 @@ impl Simulation {
                             After::Gather(tree)=>Task::Gathering{tree,time:0},
                             After::Deliver(storage,good,amount)=>Task::Delivering{storage,good,amount},
                             After::Construct(site)=>Task::Constructing{site},
+                            After::Hold(good,amount)=>Task::Holding{good,amount},
                         };
                     }else{
                         self.objects[i].task=Task::Walking{steps,after}
                     }
                 }
                 Task::Gathering{tree,time}=>{
-                    if self.entity(tree).is_none(){
+                    if self.entity(tree).is_none()||removed.contains(&tree){
                         self.objects[i].task=Task::Idle;continue
                     }
                     if time<59{
                         self.objects[i].task=Task::Gathering{tree,time:time+1}
                     } else {
-                        let (good,amount)=self.harvest_yield(tree)
-                            .unwrap_or((GOOD_WOOD,1));
+                        let Some((good,amount))=self.harvest_yield(tree) else{
+                            self.objects[i].task=Task::Idle;continue
+                        };
                         removed.insert(tree);
                         self.objects[i].carrying=amount;
                         self.objects[i].task=Task::Idle;
@@ -324,11 +417,18 @@ impl Simulation {
                     }
                 }
                 Task::Delivering{storage,good,amount}=>{
-                    if self.entity(storage).is_some(){
+                    if self.entity(storage).is_some_and(|o|o.complete){
                         self.goods[good]=self.goods[good].saturating_add(amount);
+                        self.objects[i].carrying=0;
+                        self.objects[i].task=Task::Idle;
+                    }else{
+                        self.objects[i].task=Task::Holding{good,amount};
                     }
-                    self.objects[i].carrying=0;
-                    self.objects[i].task=Task::Idle;
+                }
+                Task::Holding{good,amount}=>{
+                    if self.tick%20==0{
+                        self.start_delivery(id,good,amount);
+                    }
                 }
                 Task::Constructing{site}=>{
                     if let Some(building)=self.objects.iter_mut().find(|o|o.id==site){
