@@ -345,8 +345,8 @@ impl Game{
 
         // Animate world objects only when simulation jobs authorize playback.
         let active_harvest:std::collections::HashMap<u32,u16>=self.simulation.objects.iter()
-            .filter_map(|o|match o.task{
-                Task::Gathering{tree,time}=>Some((tree,time)),
+            .filter_map(|o|match &o.task{
+                Task::Gathering{tree,time}=>Some((*tree,*time)),
                 _=>None,
             }).collect();
         // Objects sorted by ground depth, then by x-screen order;
