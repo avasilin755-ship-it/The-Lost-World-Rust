@@ -751,6 +751,11 @@ impl Game{
         let side_x=sw-SIDE;
         draw_rectangle(0.0,0.0,sw,TOP,Color::from_rgba(20,29,25,255));
         draw_text("THE LOST WORLD  |  RUST EDITION",20.0,38.0,29.0,GOLD);
+        if side_x>850.0{
+            draw_text(&format!("FPS: {} | GD CACHE: {}",
+                get_fps(),self.sprites.cache_size()),
+                side_x-250.0,38.0,17.0,LIGHTGRAY);
+        }
         draw_text(
             &format!("GOLD: {}     WOOD: {}     STONE: {}     FOOD: {}     TICK: {}     {}",
                 self.simulation.gold,self.simulation.goods[1],
