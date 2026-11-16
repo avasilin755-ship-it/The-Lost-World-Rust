@@ -9,7 +9,7 @@ use crate::mission::MapObject;
 use crate::rules::{ObjectRule, Rules, rule_id};
 use crate::terrain::Terrain;
 use crate::economy::{Consumption,ECONOMY_ROUND_TICKS};
-use std::{cmp::Reverse, collections::{BinaryHeap, HashMap, HashSet}};
+use std::{cmp::Reverse, collections::{BinaryHeap, BTreeMap, HashMap, HashSet}};
 
 pub const GOOD_WOOD:usize=1;
 pub const GOOD_STONE:usize=2;
@@ -56,17 +56,57 @@ pub enum Task {
     Constructing{site:u32},
     /// Carrying resources until a completed warehouse becomes reachable.
     Holding{good:usize,amount:i32},
+    /// Porter has arrived at a completed store, but has not picked up the
+    /// requested unit of raw material for an unfinished building yet.
+    Fetching{site:u32,storage:u32,good:usize},
 }
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
 pub enum After {
     Idle, Gather(u32), Deliver(u32,usize,i32), Construct(u32),
     Hold(usize,i32),
+    /// Walk to a real store first. The material leaves the town stock only
+    /// when the porter actually picks it up, not at site placement.
+    Fetch(u32,u32,usize),
 }
 #[derive(Debug,Clone)]
 pub struct Entity {
     pub id:u32,pub kind:i32,pub group:i32,pub object_type:i32,pub owner:i32,
     pub x:i32,pub y:i32,pub hp:i32,pub complete:bool,pub construction:u16,
     pub task:Task,pub carrying:i32,pub facing:u8,
+}
+/// Material stock and progress belong to each construction order, not
+/// to the globally shared town warehouse. Porters carry one unit per trip.
+#[derive(Debug,Clone,PartialEq,Eq)]
+pub struct SiteLogistics {
+    pub remaining:[i32;9],
+    pub stock:[i32;9],
+    pub work_done:u16,
+    pub work_total:u16,
+    pub ready_for_work:bool,
+}
+impl SiteLogistics {
+    fn new(cost:[i32;9])->Self {
+        let remaining=cost.map(|n|n.max(0));
+        let total=remaining.iter().sum::<i32>().clamp(0,10000) as u16;
+        Self {
+            remaining,stock:[0;9],work_done:0,work_total:total.max(10),
+            ready_for_work:false,
+        }
+    }
+    fn work_step(&mut self)->bool {
+        if !self.ready_for_work {
+            if let Some(i)=self.remaining.iter().position(|&n|n>0){
+                if self.stock[i]==0{return false}
+                self.stock[i]-=1;
+                self.remaining[i]-=1;
+                self.ready_for_work=true;
+                return false
+            }
+        }
+        self.ready_for_work=false;
+        self.work_done=(self.work_done+1).min(self.work_total);
+        true
+    }
 }
 #[derive(Debug,Clone)]
 pub struct Simulation {
@@ -83,6 +123,8 @@ pub struct Simulation {
     /// is one simulated player town in the current integrated client.
     pub consumption:Consumption,
     pub races_present:[bool;3],
+    /// Original construction-site request queues and material stock.
+    pub sites:BTreeMap<u32,SiteLogistics>,
 }
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub enum GameError{
@@ -120,6 +162,7 @@ impl Simulation {
             terrain,rules,objects:states,next_id,human_race,
             gold,goods,paused:false,tick:0,
             consumption:Consumption::default(),races_present:present,
+            sites:BTreeMap::new(),
         };
         // Base mission terrain was generated from a seed and therefore has
         // not yet had any building pads constructed. Original map loading
@@ -356,9 +399,8 @@ impl Simulation {
                 }
             }
         }
-        for (i,cost) in rule.cost.iter().enumerate(){
-            if (*cost).max(0)>self.goods[i]{return Err(GameError::NotEnoughGoods)}
-        }
+        // Original placement accepts sites even if stocks are empty:
+        // per-good requests remain open until a porter can supply them.
         Ok(())
     }
     /// Find a reachable work cell outside an entire building footprint,
@@ -409,10 +451,7 @@ impl Simulation {
             Ok(path)=>path,
             Err(error)=>{self.objects.pop();return Err(error)}
         };
-        // Debit only after the placement and worker route are both valid.
-        for (i,cost) in rule.cost.iter().enumerate(){
-            self.goods[i]-=(*cost).max(0);
-        }
+        self.sites.insert(id,SiteLogistics::new(rule.cost));
         self.next_id+=1;
         if rule.object_type!=62&&rule.object_type!=63{
             self.terrain.foundation(at.0,at.1,rule.size_x,rule.size_y)
