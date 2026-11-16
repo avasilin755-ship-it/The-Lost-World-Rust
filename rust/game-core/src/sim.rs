@@ -1005,6 +1005,28 @@ mod tests{
         assert_eq!(loaded.entity(1).unwrap().task,state);
     }
     #[test]
+    fn builder_cannot_harvest_wood_but_woodcutter_can(){
+        let mut sim=setup();
+        sim.entity_mut(1).unwrap().object_type=11;
+        assert_eq!(sim.order_gather(1,2),Err(GameError::WrongWorker));
+        sim.entity_mut(1).unwrap().object_type=19;
+        assert!(sim.order_gather(1,2).is_ok());
+    }
+    #[test]
+    fn snapshot_v4_restores_paved_foundations_and_rng_state(){
+        let mut sim=setup();
+        sim.terrain.foundation(25,25,3,2);
+        let snapshot=sim.save_snapshot();
+        assert!(snapshot.starts_with(b"TLWSNAP4"));
+        let mut loaded=setup();
+        loaded.load_snapshot(&snapshot).unwrap();
+        assert_eq!(loaded.terrain.height,sim.terrain.height);
+        assert_eq!(loaded.terrain.class,sim.terrain.class);
+        assert_eq!(loaded.terrain.tile,sim.terrain.tile);
+        assert_eq!(loaded.terrain.light,sim.terrain.light);
+        assert_eq!(loaded.terrain.rng_state,sim.terrain.rng_state);
+    }
+    #[test]
     fn snapshot_rejects_truncation(){
         let mut sim=setup();
         assert!(sim.load_snapshot(b"oops").is_err());
