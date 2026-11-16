@@ -17,7 +17,7 @@ use game_core::{
 use macroquad::prelude::*;
 use resources::{WorldArt,TerrainArt,SpriteMotion,project,unproject,world_to_screen};
 use localization::{Language,Key,tr};
-use std::{env,fs,path::{Path,PathBuf}};
+use std::{collections::HashMap,env,fs,path::{Path,PathBuf}};
 
 const TOP:f32=91.0;
 const SIDE:f32=290.0;
@@ -25,6 +25,7 @@ const FOOT:f32=55.0;
 const PAN_SPEED:f32=500.0;
 const TICK_SECONDS:f32=0.10;
 const MAX_TICKS_PER_FRAME:usize=5;
+const MOVE_INTERPOLATION_TICKS:f32=6.0;
 const UI_FONT_LOCATIONS:&[&str]=&[
     "./assets/fonts/NotoSans-Regular.ttf",
     "C:/Windows/Fonts/segoeui.ttf",
@@ -55,6 +56,25 @@ fn load_ui_font()->Option<Font>{
     None
 }
 
+#[derive(Clone,Copy,Debug)]
+struct SpriteTween{
+    from:Vec2,
+    to:Vec2,
+    start_tick:u64,
+}
+fn wrapped_step(from:(i32,i32),to:(i32,i32),size:i32)->Vec2{
+    let wrap=|delta:i32|{
+        if delta>size/2{delta-size}
+        else if delta < -size/2{delta+size}
+        else{delta}
+    };
+    vec2(wrap(to.0-from.0) as f32,wrap(to.1-from.1) as f32)
+}
+fn tween_cell(tween:&SpriteTween,tick:u64,sub_tick:f32)->Vec2{
+    let elapsed=(tick.saturating_sub(tween.start_tick) as f32+sub_tick)
+        /MOVE_INTERPOLATION_TICKS;
+    tween.from.lerp(tween.to,elapsed.clamp(0.0,1.0))
+}
 /// Static minimap ground is uploaded to the GPU once per loaded map.
 /// Previously the client issued up to 65k individual mini-rect draws per frame.
 fn minimap_ground_texture(terrain:&Terrain)->Texture2D{
@@ -179,6 +199,8 @@ struct Game {
     last_click:Option<(u32,f64)>,
     ui_font:Option<Font>,
     lang:Language,
+    last_positions:HashMap<u32,(i32,i32)>,
+    tweens:HashMap<u32,SpriteTween>,
 }
 impl Game{
     fn new(
@@ -241,6 +263,10 @@ impl Game{
         let camera=project(focus.0 as f32,focus.1 as f32,h);
         let save_file=PathBuf::from("saves")
             .join(format!("{}_{index}.tlwsnap",mission_name.trim_end_matches(".mdb")));
+        let last_positions=simulation.objects.iter()
+            .filter(|o|o.kind==0||o.kind==2
+                &&simulation.rule(o).is_some_and(|r|r.class==7))
+            .map(|o|(o.id,(o.x,o.y))).collect::<HashMap<_,_>>();
         let ui_font=load_ui_font();
         let lang=if ui_font.is_some(){Language::Russian}
             else{Language::English};
@@ -249,7 +275,7 @@ impl Game{
             selected:Selection::default(),accumulator:0.0,
             minimap:true,stored:map.terrain.is_some(),save_file,toast:None,
             left_press:None,right_press:None,last_click:None,
-            ui_font,lang,
+            ui_font,lang,last_positions,tweens:HashMap::new(),
         })
     }
 
@@ -258,6 +284,50 @@ impl Game{
     }
     fn screen(&self,x:f32,y:f32)->Vec2{
         world_to_screen(&self.simulation.terrain,x,y,self.camera,self.zoom,self.center())
+    }
+    /// Visual-only interpolation. The authoritative fixed-tick simulation
+    /// remains deterministic and all saved coordinates are exact cells.
+    fn track_sprite_movements(&mut self){
+        let size=self.simulation.terrain.size as i32;
+        let tick=self.simulation.tick;
+        for obj in &self.simulation.objects{
+            let movable=obj.kind==0 || obj.kind==2
+                &&self.simulation.rule(obj).is_some_and(|r|r.class==7);
+            if !movable{continue}
+            let to=(obj.x,obj.y);
+            match self.last_positions.insert(obj.id,to){
+                Some(from) if from!=to=>{
+                    let origin=vec2(from.0 as f32,from.1 as f32);
+                    self.tweens.insert(obj.id,SpriteTween{
+                        from:origin,to:origin+wrapped_step(from,to,size),
+                        start_tick:tick
+                    });
+                }
+                _=>{}
+            }
+        }
+        self.tweens.retain(|id,tween|self.last_positions.contains_key(id)
+            &&tick.saturating_sub(tween.start_tick)<8);
+    }
+    fn reset_sprite_movements(&mut self){
+        self.tweens.clear();
+        self.last_positions=self.simulation.objects.iter()
+            .filter(|o|o.kind==0||o.kind==2
+                &&self.simulation.rule(o).is_some_and(|r|r.class==7))
+            .map(|o|(o.id,(o.x,o.y))).collect();
+    }
+    fn visual_cell(&self,entity:&Entity)->Vec2{
+        let cell=vec2(entity.x as f32,entity.y as f32);
+        let Some(tween)=self.tweens.get(&entity.id) else{return cell};
+        let fraction=if self.simulation.paused{0.0}
+            else{(self.accumulator/TICK_SECONDS).clamp(0.0,1.0)};
+        let v=tween_cell(tween,self.simulation.tick,fraction);
+        let size=self.simulation.terrain.size as f32;
+        vec2(v.x.rem_euclid(size),v.y.rem_euclid(size))
+    }
+    fn object_screen(&self,entity:&Entity)->Vec2{
+        let cell=self.visual_cell(entity);
+        self.screen(cell.x,cell.y)
     }
     fn pick_cell(&self,screen:Vec2)->(i32,i32){
         let world=(screen-self.center())/self.zoom+self.camera;
@@ -308,7 +378,7 @@ impl Game{
     fn hit_sprite(&mut self,mouse:Vec2,right:bool)->Option<u32>{
         let mut candidates:Vec<(usize,i32,u32,Vec2,u32,u8,u8)>=Vec::new();
         for o in &self.simulation.objects{
-            let p=self.screen(o.x as f32,o.y as f32);
+            let p=self.object_screen(o);
             if (p.x-mouse.x).abs()>480.0*self.zoom
                 ||(p.y-mouse.y).abs()>480.0*self.zoom{continue}
             let class=self.simulation.rule(o).map_or(-1,|r|r.class);
@@ -391,7 +461,7 @@ impl Game{
         if !append{self.selected.units.clear();}
         for o in &self.simulation.objects{
             if !self.simulation.unit_owned(o.id){continue}
-            let p=self.screen(o.x as f32,o.y as f32);
+            let p=self.object_screen(o);
             if p.x>=x0&&p.x<=x1&&p.y>=y0&&p.y<=y1
                 &&!self.selected.units.contains(&o.id)
                 &&self.selected.units.len()<12{
@@ -565,9 +635,12 @@ impl Game{
                 .map_err(|e|e.to_string())
                 .and_then(|b|self.simulation.load_snapshot(&b).map_err(|e|e.to_string()));
             match result{
-                Ok(())=>self.notify(if self.lang==Language::Russian{
-                    "Сохранение загружено"
-                }else{"Snapshot restored"}),
+                Ok(())=>{
+                    self.reset_sprite_movements();
+                    self.notify(if self.lang==Language::Russian{
+                        "Сохранение загружено"
+                    }else{"Snapshot restored"})
+                },
                 Err(e)=>self.notify(if self.lang==Language::Russian{
                     format!("Ошибка загрузки: {e}")
                 }else{format!("Load failed: {e}")})
@@ -636,6 +709,7 @@ impl Game{
             if self.accumulator<TICK_SECONDS{break}
             self.accumulator-=TICK_SECONDS;
             self.simulation.step();
+            self.track_sprite_movements();
         }
         if self.accumulator>1.0{
             self.accumulator=TICK_SECONDS
@@ -682,15 +756,15 @@ impl Game{
         // all terrain renders before world objects.
         let mut visible:Vec<(i32,i32,usize)>=self.simulation.objects.iter()
             .enumerate().filter_map(|(index,obj)|{
-                let p=self.screen(obj.x as f32,obj.y as f32);
+                let p=self.object_screen(obj);
                 if p.x< -350.0||p.x>width+350.0
                     ||p.y< -350.0||p.y>sh+350.0{return None}
-                Some((obj.x+obj.y,obj.y-obj.x,index))
+                Some((p.y as i32,p.x as i32,index))
             }).collect();
         visible.sort_by_key(|v|(v.0,v.1));
         for (_,_,index) in visible{
             let obj=&self.simulation.objects[index];
-            let position=self.screen(obj.x as f32,obj.y as f32);
+            let position=self.object_screen(obj);
             let oid=rule_id(obj.group,obj.object_type);
             let chosen=self.selected.object==Some(obj.id)
                 ||self.selected.units.contains(&obj.id);
@@ -997,5 +1071,22 @@ async fn main(){
                 next_frame().await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod motion_tests{
+    use super::*;
+    #[test]
+    fn interpolates_one_original_grid_step_over_six_ticks(){
+        let motion=SpriteTween{
+            from:vec2(10.0,10.0),to:vec2(11.0,10.0),start_tick:100
+        };
+        assert_eq!(tween_cell(&motion,100,0.0),vec2(10.0,10.0));
+        assert_eq!(tween_cell(&motion,103,0.0),vec2(10.5,10.0));
+        assert_eq!(tween_cell(&motion,106,0.0),vec2(11.0,10.0));
+        assert_eq!(tween_cell(&motion,110,0.0),vec2(11.0,10.0));
+        assert_eq!(wrapped_step((127,3),(0,3),128),vec2(1.0,0.0));
+        assert_eq!(wrapped_step((0,3),(127,3),128),vec2(-1.0,0.0));
     }
 }
