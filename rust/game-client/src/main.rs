@@ -6,6 +6,7 @@
 //! This playable scaffold is not yet full faithful original simulation.
 
 mod resources;
+mod localization;
 
 use game_core::{
     mission::{GameMap,Mission,parse_dvm,parse_mdb},
@@ -15,6 +16,7 @@ use game_core::{
 };
 use macroquad::prelude::*;
 use resources::{WorldArt,TerrainArt,SpriteMotion,project,unproject,world_to_screen};
+use localization::{Language,Key,tr};
 use std::{env,fs,path::{Path,PathBuf}};
 
 const TOP:f32=91.0;
@@ -23,6 +25,36 @@ const FOOT:f32=55.0;
 const PAN_SPEED:f32=500.0;
 const TICK_SECONDS:f32=0.10;
 const MAX_TICKS_PER_FRAME:usize=5;
+const UI_FONT_LOCATIONS:&[&str]=&[
+    "./assets/fonts/NotoSans-Regular.ttf",
+    "C:/Windows/Fonts/segoeui.ttf",
+    "C:/Windows/Fonts/arial.ttf",
+    "C:/Windows/Fonts/tahoma.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+];
+/// Game runs on Windows, so installed OS fonts are used without bundling
+/// proprietary Microsoft TTF files with the source distribution.
+fn load_ui_font()->Option<Font>{
+    let configured=env::var("TLW_FONT").ok();
+    let paths=configured.as_deref().into_iter().chain(UI_FONT_LOCATIONS.iter().copied());
+    let chars:Vec<char>="АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ        абвгдеёжзийклмнопрстуфхцчшщъыьэюя0123456789        :-—,.!?()/%+= F10FPS".chars().filter(|c|!c.is_whitespace()).collect();
+    for path in paths{
+        if let Ok(data)=fs::read(path){
+            if let Ok(mut font)=load_ttf_font_from_bytes(&data){
+                for size in [14,16,18,20,22,26,29]{
+                    font.populate_font_cache(&chars,size);
+                }
+                font.set_filter(FilterMode::Linear);
+                println!("UI font with Cyrillic enabled: {path}");
+                return Some(font)
+            }
+        }
+    }
+    eprintln!("Russian UI font is missing: set TLW_FONT to a TTF with Cyrillic glyphs");
+    None
+}
+
 /// Static minimap ground is uploaded to the GPU once per loaded map.
 /// Previously the client issued up to 65k individual mini-rect draws per frame.
 fn minimap_ground_texture(terrain:&Terrain)->Texture2D{
@@ -145,6 +177,8 @@ struct Game {
     left_press:Option<Vec2>,
     right_press:Option<Vec2>,
     last_click:Option<(u32,f64)>,
+    ui_font:Option<Font>,
+    lang:Language,
 }
 impl Game{
     fn new(
@@ -207,11 +241,15 @@ impl Game{
         let camera=project(focus.0 as f32,focus.1 as f32,h);
         let save_file=PathBuf::from("saves")
             .join(format!("{}_{index}.tlwsnap",mission_name.trim_end_matches(".mdb")));
+        let ui_font=load_ui_font();
+        let lang=if ui_font.is_some(){Language::Russian}
+            else{Language::English};
         Ok(Self{
             simulation,ground,sprites,minimap_ground,mission,camera,zoom:1.0,
             selected:Selection::default(),accumulator:0.0,
             minimap:true,stored:map.terrain.is_some(),save_file,toast:None,
             left_press:None,right_press:None,last_click:None,
+            ui_font,lang,
         })
     }
 
@@ -226,6 +264,13 @@ impl Game{
         let p=unproject(world);
         let n=self.simulation.terrain.size as i32;
         ((p.x.round() as i32).rem_euclid(n),(p.y.round() as i32).rem_euclid(n))
+    }
+    fn draw_ui(&self,message:&str,x:f32,y:f32,size:f32,color:Color){
+        draw_text_ex(message,x,y,TextParams{
+            font:self.ui_font.as_ref(),
+            font_size:size.round().clamp(8.0,255.0) as u16,
+            color,..Default::default()
+        });
     }
     fn notify(&mut self,message:impl Into<String>){
         let message=message.into();
@@ -363,7 +408,9 @@ impl Game{
             self.selected.unit.into_iter().collect::<Vec<_>>()
         }else{self.selected.units.clone()};
         if selected.is_empty(){
-            self.notify("Select one or more workers with LEFT CLICK");return
+            self.notify(if self.lang==Language::Russian{
+                "Выберите одного или нескольких рабочих ЛКМ"
+            }else{"Select one or more workers with LEFT CLICK"});return
         }
         let mut accepted=0;
         let mut error=None;
@@ -379,8 +426,15 @@ impl Game{
             match result{Ok(())=>accepted+=1,Err(e)=>error=Some(e)}
         }
         if accepted>0{
-            self.notify(format!("Order accepted: {accepted} units to {},{}",target.0,target.1))
-        }else if let Some(e)=error{self.notify(format!("Order rejected: {e}"))}
+            self.notify(if self.lang==Language::Russian{
+                format!("Приказ принят: {accepted} персонажей → {},{}",target.0,target.1)
+            }else{format!("Order accepted: {accepted} units to {},{}",target.0,target.1)})
+        }else if let Some(e)=error{
+            let text=localization::error_name(self.lang,&e);
+            self.notify(if self.lang==Language::Russian{
+                format!("Приказ отклонён: {text}")
+            }else{format!("Order rejected: {text}")})
+        }
     }
     fn handle_mouse_click(&mut self,mouse:Vec2,left:bool){
         if let Some(cell)=self.minimap_cell(mouse){
@@ -419,11 +473,22 @@ impl Game{
                     match self.simulation.build(unit,oid,target){
                         Ok(id)=>{
                             self.selected.object=Some(id);
-                            self.notify(format!("Construction started: type {ty}"))
+                            self.notify(if self.lang==Language::Russian{
+                                format!("Строительство начато: объект №{ty}")
+                            }else{format!("Construction started: type {ty}")})
                         }
-                        Err(e)=>self.notify(format!("Cannot build: {e}")),
+                        Err(e)=>{
+                            let text=localization::error_name(self.lang,&e);
+                            self.notify(if self.lang==Language::Russian{
+                                format!("Нельзя построить: {text}")
+                            }else{format!("Cannot build: {text}")})
+                        },
                     }
-                }else{self.notify("Select a builder before placing a building")}
+                }else{
+                    self.notify(if self.lang==Language::Russian{
+                        "Сначала выберите строителя"
+                    }else{"Select a builder before placing a building"})
+                }
                 return
             }
             let hit=self.hit_sprite(mouse,false);
@@ -440,7 +505,9 @@ impl Game{
             if self.simulation.order_move(unit,cell).is_ok(){count+=1}
         }
         if count>0{
-            self.notify(format!("Minimap move: {count} units to {},{}",cell.0,cell.1));
+            self.notify(if self.lang==Language::Russian{
+                format!("Приказ по мини-карте: {count} персонажей → {},{}",cell.0,cell.1)
+            }else{format!("Minimap move: {count} units to {},{}",cell.0,cell.1)});
         }
     }
 
@@ -457,11 +524,26 @@ impl Game{
             self.selected.error=None;
         }
         if is_key_pressed(KeyCode::P){self.simulation.paused=!self.simulation.paused}
+        if is_key_pressed(KeyCode::F10){
+            if self.ui_font.is_some()||self.lang==Language::Russian{
+                self.lang=self.lang.toggle();
+                self.notify(if self.lang==Language::Russian{
+                    "Язык интерфейса: русский"
+                }else{"Interface language: English"});
+            }
+        }
         if is_key_pressed(KeyCode::X){
             if let Some(unit)=self.selected.unit{
                 match self.simulation.drop_cargo(unit){
-                    Ok(())=>self.notify("Carried resources dropped; worker is free"),
-                    Err(e)=>self.notify(format!("Cannot drop cargo: {e}")),
+                    Ok(())=>self.notify(if self.lang==Language::Russian{
+                        "Груз сброшен, рабочий свободен"
+                    }else{"Carried resources dropped; worker is free"}),
+                    Err(e)=>{
+                        let text=localization::error_name(self.lang,&e);
+                        self.notify(if self.lang==Language::Russian{
+                            format!("Нельзя сбросить груз: {text}")
+                        }else{format!("Cannot drop cargo: {text}")})
+                    },
                 }
             }
         }
@@ -469,16 +551,26 @@ impl Game{
         if is_key_pressed(KeyCode::F5){
             let result=fs::create_dir_all("saves")
                 .and_then(|_|fs::write(&self.save_file,self.simulation.save_snapshot()));
-            match result{Ok(())=>self.notify("Snapshot saved (F9 to restore)"),
-                Err(e)=>self.notify(format!("Save failed: {e}"))}
+            match result{
+                Ok(())=>self.notify(if self.lang==Language::Russian{
+                    "Игра сохранена (F9 — загрузить)"
+                }else{"Snapshot saved (F9 to restore)"}),
+                Err(e)=>self.notify(if self.lang==Language::Russian{
+                    format!("Ошибка сохранения: {e}")
+                }else{format!("Save failed: {e}")})
+            }
         }
         if is_key_pressed(KeyCode::F9){
             let result=fs::read(&self.save_file)
                 .map_err(|e|e.to_string())
                 .and_then(|b|self.simulation.load_snapshot(&b).map_err(|e|e.to_string()));
             match result{
-                Ok(())=>self.notify("Snapshot restored"),
-                Err(e)=>self.notify(format!("Load failed: {e}"))
+                Ok(())=>self.notify(if self.lang==Language::Russian{
+                    "Сохранение загружено"
+                }else{"Snapshot restored"}),
+                Err(e)=>self.notify(if self.lang==Language::Russian{
+                    format!("Ошибка загрузки: {e}")
+                }else{format!("Load failed: {e}")})
             }
         }
         if is_key_pressed(KeyCode::Key1){self.selected.build=Some(37)}
