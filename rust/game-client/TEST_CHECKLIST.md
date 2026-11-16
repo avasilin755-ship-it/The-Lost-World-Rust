@@ -50,6 +50,72 @@ save action was accepted, not that its contents can be restored perfectly.
 - [ ] At 1x, inspect trees, rock, berries and snow/water transitions
       for overlays, flicker, clipping and mismatched animations.
 
+## Third Windows playtest — 2026-11-16 (56.53 s)
+
+Source: user-uploaded 20261116-1905-48.3852257.mp4 (1920x1032).
+The game is recorded for approximately seconds 0–41, then the video
+switches to unrelated desktop applications.
+
+### Confirmed
+
+- 00–16: original HUD, terrain-coloured minimap and camera movement.
+- 17–20: selected builder and green multi-cell building footprint.
+- 21–31: house cycles through construction sprites and completes.
+- 33–38: Russian F5 and F9 success notices appear; completed house
+  remains visible after load. This does NOT validate mid-build restore.
+- 38: diagnostic overlay shows ~54 FPS at zoom 2.05x, 660 objects,
+  65 GD cache entries, CPU update 0.1 ms, world 1.6 ms, HUD 0.4 ms.
+  Combined ~2.1 ms CPU drawing/update is not sufficient to explain a
+  18.5 ms frame; OS pacing, vsync and GPU timing remain candidates.
+
+### Confirmed defects and fixes since the recording
+
+- A selected building formerly displayed the worker-only Idle / Свободен
+  status: replaced with proper translated state, costs, dimensions,
+  HP and progress in the selection page.
+- Construction finished in about ten seconds and was at maximum HP
+  immediately: introduced original-inspired 15-tick work/material
+  pacing and ten stages of progressive HP. The exact per-material
+  porter delivery loop remains unimplemented.
+- Any owned unit could build: only type-11 builders can now start or
+  resume work. Resume button dispatches an idle builder to a site.
+- Duplicate town hall and missing-resources build buttons now refuse
+  selection; town overview shows storage capacity per good.
+- Added an independent, tested original 600-slot scheduler module
+  (LIFO execution, holds, periodic jobs). Full job integration is pending.
+- Live food/luxury consumption now runs each 299 ticks with original
+  float32 accumulation. For now, population is approximated by living
+  outdoor player units; indoor residents and independent towns remain
+  to be ported.
+- TLWSNAP5 persists food/luxury fractional needs and participating races.
+  Old snapshot versions 1–4 remain readable.
+- Improved the native 60 FPS sleep margin to reduce Windows oversleep.
+  Still requires confirmation on the player's desktop.
+
+### Targeted checklist for the next video
+
+- [ ] Build a house and note time from 0 to 100%. There should be ten
+      construction steps, progressive HP, and a slower build than before.
+- [ ] Save F5 while the house is 20–70% complete, let it finish, load
+      F9, and verify the previous percentage, worker task and inventory.
+- [ ] Select a porter, try placing a building; it should be rejected.
+      A builder should still be able to place and resume sites.
+- [ ] Stop work on an unfinished house by moving the builder, select
+      the house and click Продолжить стройку. Work should restart
+      without paying building costs again.
+- [ ] Click a completed house: it should display Построено rather
+      than Свободен, with HP and footprint details.
+- [ ] Open the Town page and verify capacity of 25 per completed
+      town hall/warehouse; construction sites add no capacity.
+- [ ] Observe food stock for at least two 299-tick rounds (~60 sec);
+      it should not decrement once per rendered frame. Indoor
+      population is not simulated yet.
+- [ ] Keep F3 visible at zoom 1x and 2x. Report FPS plus CPU update,
+      world and HUD milliseconds, and monitor refresh rate.
+- [ ] Check minimap/world alignment while panning across a torus seam.
+- [ ] Test original settings and HUD pages at both 1280x720 and
+      1920x1080. Check Russian text truncation and tiny controls.
+
 ## Pull and launch
 
 ~~~powershell
