@@ -189,6 +189,18 @@ impl Simulation {
         paths.sort_by_key(|p|p.len());
         paths.into_iter().next().ok_or(GameError::NoPath)
     }
+    /// Explicit escape hatch for a worker holding cargo without storage.
+    /// Never discard items automatically: the player must request it.
+    pub fn drop_cargo(&mut self,unit:u32)->Result<(),GameError>{
+        if !self.unit_owned(unit){return Err(GameError::NotOwned)}
+        let worker=self.entity_mut(unit).ok_or(GameError::MissingObject)?;
+        if !matches!(worker.task,Task::Holding{..}){
+            return Err(GameError::Invalid("worker is not waiting with cargo"))
+        }
+        worker.carrying=0;
+        worker.task=Task::Idle;
+        Ok(())
+    }
     pub fn order_move(&mut self,unit:u32,target:(i32,i32))->Result<(),GameError>{
         if !self.unit_owned(unit){return Err(GameError::NotOwned)}
         let source=self.entity(unit).ok_or(GameError::MissingObject)?;
@@ -735,6 +747,17 @@ mod tests{
         sim.build(1,rule_id(2,40),(25,25)).unwrap();
         for _ in 0..400{sim.step()}
         assert_eq!(sim.can_build(1,rule_id(2,40),(28,28)),Err(GameError::TownHallExists));
+    }
+    #[test]
+    fn player_can_release_worker_when_no_storage_exists(){
+        let mut sim=setup();
+        sim.order_gather(1,2).unwrap();
+        for _ in 0..100{sim.step()}
+        assert!(matches!(sim.entity(1).unwrap().task,Task::Holding{..}));
+        sim.drop_cargo(1).unwrap();
+        assert_eq!(sim.entity(1).unwrap().carrying,0);
+        assert_eq!(sim.entity(1).unwrap().task,Task::Idle);
+        assert_eq!(sim.goods[GOOD_WOOD],0);
     }
     #[test]
     fn snapshot_preserves_active_gather_task(){
