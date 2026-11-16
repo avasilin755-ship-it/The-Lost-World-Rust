@@ -269,6 +269,16 @@ fn draw_tile(x: i32, y: i32, screen: Vec2, zoom: f32, selected: bool) {
         Color::from_rgba(13, 26, 22, 80));
 }
 
+/// Painter order for isometric world objects (furthest anchors first).
+///
+/// IMPORTANT: the entire opaque ground layer must be drawn BEFORE this list,
+/// otherwise later ground diamonds overpaint tall trees, houses, units and ships.
+fn object_painter_order(objects: &[Object]) -> Vec<usize> {
+    let mut indices: Vec<usize> = (0..objects.len()).collect();
+    indices.sort_by_key(|&i| (objects[i].x + objects[i].y, objects[i].x));
+    indices
+}
+
 fn initial_objects() -> Vec<Object> {
     let mut objects = vec![
         Object { x: 6, y: 7, kind: Kind::House },
@@ -416,8 +426,8 @@ pub async fn run(base_path: PathBuf, addon_path: PathBuf) -> Result<(), String> 
 
         clear_background(Color::from_rgba(28, 45, 42, 255));
         let time = get_time() - start_time;
-        // Painter's order: increasing x+y and then x, matching the original's
-        // broad anchor-cell ordering. Each tile and its objects share a depth.
+        // Pass 1: draw ALL opaque ground tiles first. Terrain may never be
+        // drawn on top of a unit or tall building in this flat-world prototype.
         for depth in 0..SIDE * 2 - 1 {
             for x in 0..SIDE {
                 let y = depth - x;
@@ -426,10 +436,17 @@ pub async fn run(base_path: PathBuf, addon_path: PathBuf) -> Result<(), String> 
                 if p.x < -250.0 || p.x > screen_width() + 250.0
                     || p.y < -270.0 || p.y > screen_height() + 140.0 { continue; }
                 draw_tile(x, y, p, zoom, selected == Some((x, y)));
-                for obj in objects.iter().filter(|o| o.x == x && o.y == y) {
-                    assets.draw(obj.kind, p.x, p.y, zoom, time);
-                }
             }
+        }
+
+        // Pass 2: draw sprites above the entire terrain surface. Objects still
+        // overlap each other in original isometric painter order by anchor.
+        // Do not cull only by the anchor: tall sprites can be visible even when
+        // their anchor point is just outside the window.
+        for index in object_painter_order(&objects) {
+            let obj = &objects[index];
+            let p = project(obj.x as f32, obj.y as f32) * zoom + camera;
+            assets.draw(obj.kind, p.x, p.y, zoom, time);
         }
         draw_overlay(selected, &objects, &assets, zoom);
         next_frame().await;
@@ -455,6 +472,22 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn objects_are_depth_sorted_independently_of_ground() {
+        let objects = vec![
+            Object { x: 6, y: 9, kind: Kind::House },
+            Object { x: 2, y: 1, kind: Kind::Tree },
+            Object { x: 7, y: 8, kind: Kind::Person },
+            Object { x: 3, y: 4, kind: Kind::School },
+        ];
+        let ordered = object_painter_order(&objects);
+        assert_eq!(ordered, vec![1, 3, 0, 2]);
+        assert_eq!(
+            ordered.iter().map(|&i| objects[i].x + objects[i].y).collect::<Vec<_>>(),
+            vec![3, 7, 15, 15],
+        );
     }
 
     #[test]
