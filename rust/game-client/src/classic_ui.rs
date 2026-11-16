@@ -100,18 +100,29 @@ pub fn draw(g:&Game){
         ("R",g.ui.show_resources),
     ].iter().enumerate(){
         let y=[54.0,82.0,109.0][i];
-        button(g,label,166.0,y,20.0,20.0,*on,true);
+        if !g.ui.art.draw_icon(["GEBAEUDE","EINHEITEN","HAENDLER"][i],
+            166.0,y,20.0,20.0,0){
+            button(g,label,166.0,y,20.0,20.0,*on,true);
+        }
+        if !on{
+            rect(166.0,y,20.0,20.0,Color::from_rgba(15,19,15,175));
+        }
     }
-    button(g,"M",11.0,162.0,30.0,29.0,
-        g.ui.page==HudPage::Settings,true);
+    if !g.ui.art.draw_icon("OPTIONEN",11.0,162.0,30.0,29.0,0){
+        button(g,"M",11.0,162.0,30.0,29.0,
+            g.ui.page==HudPage::Settings,true);
+    }
     txt(g,if g.lang==crate::localization::Language::Russian{
         "МАСШТАБ"
     }else{"ZOOM"},55.0,172.0,11.0,LIGHTGRAY);
     // In the original, x=54..162 is the zoom slider with a RING handle.
     rect(56.0,184.0,102.0,2.0,Color::from_rgba(123,115,74,255));
     let ratio=(g.zoom-0.5)/2.25;
-    let p=pos(55.0+ratio.clamp(0.0,1.0)*101.0,181.0);
-    draw_circle(p.x,p.y,7.0*hud_scale(),GOLD);
+    let handle_x=55.0+ratio.clamp(0.0,1.0)*101.0;
+    if !g.ui.art.draw_icon("RING",handle_x-10.0,172.0,21.0,21.0,0){
+        let p=pos(handle_x,181.0);
+        draw_circle(p.x,p.y,7.0*hud_scale(),GOLD);
+    }
 
     let ru=g.lang==crate::localization::Language::Russian;
     txt(g,if ru{"ПОСЕЛЕНИЕ"}else{"SETTLEMENT"},19.0,213.0,13.0,GOLD);
@@ -127,6 +138,8 @@ pub fn draw(g:&Game){
     txt(g,&format!("{}: {}",
         if ru{"Золото"}else{"Gold"},g.simulation.gold),
         18.0,289.0,14.0,GOLD);
+    // Every race has its own original treasury chest sprite.
+    g.ui.art.draw_icon("SCHATZKISTE",130.0,274.0,39.0,28.0,0);
 
     let tabs=[
         (HudPage::Town,if ru{"Г"}else{"T"}),
@@ -135,8 +148,16 @@ pub fn draw(g:&Game){
         (HudPage::Settings,if ru{"М"}else{"M"}),
     ];
     for (i,(page,label)) in tabs.iter().enumerate(){
-        button(g,label,12.0+i as f32*34.0,300.0,30.0,30.0,
-            g.ui.page==*page,true);
+        let x=12.0+i as f32*28.0;
+        let sprite=["STADTSTATISTIK","GEBAEUDEBAUEN","INFO","OPTIONEN"][i];
+        if !g.ui.art.draw_icon(sprite,x,300.0,30.0,30.0,0){
+            button(g,label,x,300.0,30.0,30.0,g.ui.page==*page,true);
+        }
+        // The original bar does not tint its active page; its icons are
+        // only tinted on hover. A small underline aids desktop navigation.
+        if g.ui.page==*page{
+            rect(x+2.0,330.0,26.0,2.0,GOLD);
+        }
     }
 
     // PAGE_ORIGIN is (4,335) in the original HUD. The graphics archive
@@ -268,7 +289,7 @@ pub fn click(g:&mut Game,mouse:Vec2,left:bool)->bool{
     }
     for (i,page) in [HudPage::Town,HudPage::Build,HudPage::Selection,HudPage::Settings]
         .iter().enumerate(){
-        if in_rect(local,12.0+i as f32*34.0,300.0,30.0,30.0){
+        if in_rect(local,12.0+i as f32*28.0,300.0,30.0,30.0){
             g.ui.page=*page;return true
         }
     }
