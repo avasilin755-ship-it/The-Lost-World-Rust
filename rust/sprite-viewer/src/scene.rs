@@ -6,14 +6,16 @@
 
 use game_core::gd::{GdEntry, OpacityMode, decode_gd_frames, gd_index_size, parse_gd_index};
 use game_core::od::{OdAnchor, OdIndex, parse_od};
+use crate::scene_terrain::TerrainArt;
 use macroquad::prelude::*;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 
 const SIDE: i32 = 18;
-const TILE_W: f32 = 72.0;
-const TILE_H: f32 = 36.0;
+// The original engine uses a 64x44 isometric cell at 1x zoom.
+const TILE_W: f32 = 64.0;
+const TILE_H: f32 = 44.0;
 const TOP_BAR: f32 = 90.0;
 const BOTTOM_BAR: f32 = 48.0;
 
@@ -353,7 +355,7 @@ fn draw_overlay(
     draw_text("THE LOST WORLD  |  ISOMETRIC SCENE TEST", 18.0, 34.0, 27.0, GOLD);
     draw_text(
         &format!(
-            "Rust + Macroquad  |  Original GD objects  |  {} placed  |  zoom {:.1}x  |  procedural tiles",
+            "Rust + Macroquad  |  Original GD/OD objects  |  {} placed  |  zoom {:.1}x  |  64x44 cells",
             objects.len(), zoom
         ),
         18.0, 68.0, 18.0, LIGHTGRAY
@@ -394,6 +396,19 @@ pub async fn run(base_path: PathBuf, addon_path: PathBuf) -> Result<(), String> 
     let base = Archive::open(base_path)?;
     let addon = Archive::open(addon_path)?;
     let assets = Assets::load(&base, &addon);
+    let terrain = base.path.parent()
+        .ok_or("The original dv.gd path has no parent directory")?
+        .to_path_buf();
+    let ground_art = match TerrainArt::load(&terrain) {
+        Ok(g) => {
+            println!("Loaded original .os ground textures; using animated water and original coastline.");
+            Some(g)
+        }
+        Err(e) => {
+            eprintln!("Original .os textures unavailable ({e}); falling back to placeholder terrain.");
+            None
+        }
+    };
     let mut objects = initial_objects();
     let mut camera = vec2(screen_width() * 0.5, 142.0);
     let mut zoom = 1.0f32;
@@ -466,7 +481,14 @@ pub async fn run(base_path: PathBuf, addon_path: PathBuf) -> Result<(), String> 
                 let p = project(x as f32, y as f32) * zoom + camera;
                 if p.x < -250.0 || p.x > screen_width() + 250.0
                     || p.y < -270.0 || p.y > screen_height() + 140.0 { continue; }
-                draw_tile(x, y, p, zoom, selected == Some((x, y)));
+                if let Some(art) = &ground_art {
+                    art.draw_cell(
+                        p.x, p.y, zoom, x, y, water, time,
+                        selected == Some((x, y)),
+                    );
+                } else {
+                    draw_tile(x, y, p, zoom, selected == Some((x, y)));
+                }
             }
         }
 
