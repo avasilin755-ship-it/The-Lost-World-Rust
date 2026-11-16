@@ -301,7 +301,12 @@ fn draw_tile(x: i32, y: i32, screen: Vec2, zoom: f32, selected: bool) {
 /// otherwise later ground diamonds overpaint tall trees, houses, units and ships.
 fn object_painter_order(objects: &[Object]) -> Vec<usize> {
     let mut indices: Vec<usize> = (0..objects.len()).collect();
-    indices.sort_by_key(|&i| (objects[i].x + objects[i].y, objects[i].x));
+    // In the original, equal-depth anchors render left-to-right, increasing
+    // screen X: y - x (docs/rendering/objects.md, section 12.2).
+    indices.sort_by_key(|&i| (
+        objects[i].x + objects[i].y,
+        objects[i].y - objects[i].x,
+    ));
     indices
 }
 
@@ -524,7 +529,7 @@ mod tests {
             Object { x: 3, y: 4, kind: Kind::School },
         ];
         let ordered = object_painter_order(&objects);
-        assert_eq!(ordered, vec![1, 3, 0, 2]);
+        assert_eq!(ordered, vec![1, 3, 2, 0]);
         assert_eq!(
             ordered.iter().map(|&i| objects[i].x + objects[i].y).collect::<Vec<_>>(),
             vec![3, 7, 15, 15],
