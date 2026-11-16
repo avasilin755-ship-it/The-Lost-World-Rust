@@ -406,7 +406,7 @@ mod tests{
         let n=128;
         let mut t=Terrain{
             size_bits:7,size:n,height:vec![0;n*n],class:vec![0;n*n],
-            tile:vec![0;n*n],light:vec![162;n*n],rng_state:0
+            tile:vec![0;n*n],light:vec![162;n*n],rng_state:0,water_class:11
         };
         let water_cell=t.index(3,3);
         t.class[water_cell]=11;
