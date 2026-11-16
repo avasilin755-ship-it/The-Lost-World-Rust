@@ -30,6 +30,7 @@ impl MsRand{
 pub struct Terrain{
     pub size_bits:u32,pub size:usize,pub height:Vec<u16>,
     pub class:Vec<u8>,pub tile:Vec<u8>,pub light:Vec<u8>,pub rng_state:u32,
+    pub water_class:u8,
 }
 impl Terrain{
     pub fn index(&self,x:i32,y:i32)->usize{
@@ -37,12 +38,12 @@ impl Terrain{
         ((y&mask) as usize)*self.size+(x&mask) as usize
     }
     pub fn at(&self,x:i32,y:i32)->u8{self.class[self.index(x,y)]}
-    pub fn water(&self,x:i32,y:i32)->bool{self.at(x,y)==CLASS_WATER}
+    pub fn water(&self,x:i32,y:i32)->bool{self.at(x,y)>=self.water_class}
 
     /// Stored Gold missions save heights and global tile IDs; caller supplies
     /// the Gold tile-index to class mapping from loaded .os set counts.
     pub fn from_stored(
-        size_bits:u32,height:Vec<u16>,tile:Vec<u8>,class_lookup:&[u8;256],
+        size_bits:u32,height:Vec<u16>,tile:Vec<u8>,class_lookup:&[u8;256],water_class:u8,
     )->Result<Self,TerrainError>{
         if !matches!(size_bits,7|8|9){return Err(TerrainError::Invalid("invalid size bits"))}
         let size=1usize<<size_bits;
@@ -50,7 +51,7 @@ impl Terrain{
             return Err(TerrainError::Invalid("incorrect terrain size"));
         }
         let class=tile.iter().map(|&t|class_lookup[t as usize]).collect();
-        let mut this=Self{size_bits,size,height,class,tile,light:vec![0;size*size],rng_state:0};
+        let mut this=Self{size_bits,size,height,class,tile,light:vec![0;size*size],rng_state:0,water_class};
         this.compute_light();
         Ok(this)
     }
@@ -193,7 +194,7 @@ pub fn generate_base(seed:u32,bits:u32,pick:&[[u8;256];12])->Result<Terrain,Terr
     }
     let mut terrain=Terrain{
         size_bits:bits,size:n,height,class:cls,tile,
-        light:vec![0u8;count],rng_state:rand.state
+        light:vec![0u8;count],rng_state:rand.state,water_class:CLASS_WATER
     };
     terrain.compute_light();
     Ok(terrain)
