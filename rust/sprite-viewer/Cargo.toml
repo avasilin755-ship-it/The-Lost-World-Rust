@@ -1,0 +1,12 @@
+[package]
+name = "tlw-sprite-viewer"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+macroquad = "=0.4.16"
+
+# This small desktop tool has a separate Cargo workspace so that
+# GUI dependencies do not affect the portable game-core library.
+[workspace]
