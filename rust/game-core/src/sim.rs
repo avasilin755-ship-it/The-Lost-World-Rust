@@ -546,8 +546,7 @@ impl Simulation {
         for site in site_ids{
             let Some(target)=self.entity(site) else{continue};
             if target.complete{continue}
-            let (pos,required) = ((target.x,target.y),
-                self.sites[&site].remaining);
+            let required=self.sites[&site].remaining;
             let local=self.sites[&site].stock;
             let mut transit=self.site_in_flight(site);
             for good in 0..9 {
@@ -583,7 +582,6 @@ impl Simulation {
                     if !dispatched{break}
                 }
             }
-            let _=pos; // site location is read again when a porter arrives
         }
     }
     /// Arrive at a completed store; pick up exactly one town good, then
@@ -753,20 +751,22 @@ impl Simulation {
                         self.objects[i].task=Task::Idle;continue
                     };
                     let full_hp=self.rule(target).map_or(1,|r|r.hp.max(1));
-                    let Some(supply)=self.sites.get_mut(&site) else{
+                    // Finish borrowing the per-site ledger before
+                    // mutating the physical building entity.
+                    let update=if let Some(supply)=self.sites.get_mut(&site){
+                        if supply.work_step(){
+                            Some((supply.work_done,supply.work_total))
+                        }else{None}
+                    }else{
                         self.objects[i].task=Task::Idle;continue
                     };
-                    // In the original, one material is consumed first,
-                    // followed by a work step 15 ticks later. A builder
-                    // waits without advancing progress when stock is empty.
-                    if supply.work_step(){
-                        let progress=u32::from(supply.work_done)*100
-                            /u32::from(supply.work_total);
+                    if let Some((done,total))=update{
+                        let progress=u32::from(done)*100/u32::from(total);
                         if let Some(building)=self.entity_mut(site){
                             building.construction=progress as u16;
                             building.hp=((progress as i32*full_hp)/100)
                                 .clamp(1,full_hp);
-                            if supply.work_done==supply.work_total{
+                            if done==total{
                                 building.complete=true;
                                 self.objects[i].task=Task::Idle;
                             }
@@ -778,9 +778,9 @@ impl Simulation {
         if !removed.is_empty(){
             self.objects.retain(|o|!removed.contains(&o.id));
         }
-        self.sites.retain(|site,_|
-            self.objects.iter().any(|o|o.id==*site&&!o.complete)
-        );
+        let live_sites:HashSet<u32>=self.objects.iter()
+            .filter(|o|o.kind==1&&!o.complete).map(|o|o.id).collect();
+        self.sites.retain(|site,_|live_sites.contains(site));
         if self.tick%15==0{
             self.dispatch_site_materials();
         }
