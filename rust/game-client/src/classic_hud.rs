@@ -11,6 +11,7 @@ use game_core::gd::{
 };
 use macroquad::prelude::*;
 use std::{
+    collections::HashMap,
     fs::{self,File},io::{Read,Seek,SeekFrom},path::{Path,PathBuf},
 };
 
@@ -48,7 +49,7 @@ fn race_ui_archive(data_dir:&Path,race:i32)->Option<PathBuf>{
     })
 }
 
-fn extract_background(path:&Path)->Result<Texture2D,String>{
+fn extract_original_ui(path:&Path)->Result<(Option<Texture2D>,HashMap<String,Vec<Texture2D>>),String>{
     let mut file=File::open(path).map_err(|e|format!("{}: {e}",path.display()))?;
     let len=file.metadata().map_err(|e|e.to_string())?.len() as usize;
     let mut header=[0u8;24];
@@ -61,46 +62,89 @@ fn extract_background(path:&Path)->Result<Texture2D,String>{
     file.seek(SeekFrom::Start(0)).map_err(|e|e.to_string())?;
     file.read_exact(&mut index_bytes).map_err(|e|e.to_string())?;
     let index=parse_gd_index(&index_bytes,len).map_err(|e|e.to_string())?;
-    let entry=index.entries.iter().find(|e|
-        e.name.eq_ignore_ascii_case("INTERFACE1024")
-    ).ok_or("INTERFACE1024 is not in this race UI archive")?;
-    if entry.width>2048||entry.height>2048||entry.data_length>32*1024*1024{
-        return Err("invalid interface image dimensions".into())
+    // Only the few native HUD icons actually used by the new client are
+    // uploaded, not all frames of the original UI archive.
+    const WANTED:&[&str]=&[
+        "INTERFACE1024","GEBAEUDE","EINHEITEN","HAENDLER",
+        "STADTGEBIETE","OPTIONEN","RING","SCHATZKISTE",
+        "GEBAEUDEBAUEN","GEBAEUDEINFO","BEWOHNER","STADTSTATISTIK",
+        "INFO","MOTIVATION","ROHSTOFFE","FORSCHUNG",
+    ];
+    let mut icons=HashMap::new();
+    for entry in &index.entries{
+        if !WANTED.iter().any(|&name|entry.name.eq_ignore_ascii_case(name)){
+            continue
+        }
+        if entry.width==0||entry.height==0||entry.width>2048
+            ||entry.height>2048||entry.data_length>32*1024*1024
+            ||entry.data_length==0||entry.frames==0{
+            continue
+        }
+        file.seek(SeekFrom::Start(entry.data_offset as u64))
+            .map_err(|e|e.to_string())?;
+        let mut block=vec![0u8;entry.data_length];
+        file.read_exact(&mut block).map_err(|e|e.to_string())?;
+        let take=if entry.name.eq_ignore_ascii_case("SCHATZKISTE"){
+            entry.frames.min(7)-1
+        }else{0};
+        let Ok(frames)=decode_gd_frames(
+            entry,&block,Some(take),
+            if entry.name.eq_ignore_ascii_case("INTERFACE1024"){
+                OpacityMode::AutoOpaque
+            }else{OpacityMode::Preserve}
+        )else{continue};
+        let mut textures=Vec::with_capacity(frames.len());
+        for data in frames{
+            let tex=Texture2D::from_rgba8(entry.width as u16,entry.height as u16,&data);
+            tex.set_filter(FilterMode::Nearest);
+            textures.push(tex);
+        }
+        if !textures.is_empty(){
+            icons.insert(entry.name.to_ascii_uppercase(),textures);
+        }
     }
-    file.seek(SeekFrom::Start(entry.data_offset as u64)).map_err(|e|e.to_string())?;
-    let mut block=vec![0u8;entry.data_length];
-    file.read_exact(&mut block).map_err(|e|e.to_string())?;
-    let frames=decode_gd_frames(entry,&block,Some(0),OpacityMode::AutoOpaque)
-        .map_err(|e|format!("interface.gd decode: {e}"))?;
-    let data=frames.first().ok_or("empty interface background")?;
-    let texture=Texture2D::from_rgba8(entry.width as u16,entry.height as u16,data);
-    texture.set_filter(FilterMode::Nearest);
+    let background=icons.get("INTERFACE1024")
+        .and_then(|frames|frames.first()).cloned();
     println!(
-        "Classic race interface loaded: {} ({}x{})",
-        path.display(),entry.width,entry.height
+        "Classic race interface: {} ({} original UI sprites loaded)",
+        path.display(),icons.len()
     );
-    Ok(texture)
+    Ok((background,icons))
 }
 
 pub struct ClassicHudArt{
     pub background:Option<Texture2D>,
+    icons:HashMap<String,Vec<Texture2D>>,
 }
 impl ClassicHudArt{
     pub fn load(data_dir:&Path,race:i32)->Self{
-        let background=race_ui_archive(data_dir,race)
-            .and_then(|path|match extract_background(&path){
-                Ok(image)=>Some(image),
+        let (background,icons)=race_ui_archive(data_dir,race)
+            .and_then(|path|match extract_original_ui(&path){
+                Ok(art)=>Some(art),
                 Err(error)=>{
-                    eprintln!("Could not load original UI background: {error}");
+                    eprintln!("Could not load original UI archive: {error}");
                     None
                 }
-            });
+            }).unwrap_or_else(||(None,HashMap::new()));
         if background.is_none(){
-            eprintln!(
-                "Original race interface.gd not found; using a safe drawn fallback panel"
-            );
+            eprintln!("Original interface.gd not found; using fallback HUD");
         }
-        Self{background}
+        Self{background,icons}
+    }
+    /// Draw an original race-specific icon with its real transparent alpha.
+    /// Coordinates use the classic 192x768 logical reference.
+    pub fn draw_icon(
+        &self,name:&str,x:f32,y:f32,w:f32,h:f32,frame:usize
+    )->bool{
+        let Some(frames)=self.icons.get(name) else{return false};
+        let Some(texture)=frames.get(frame.min(frames.len()-1)) else{return false};
+        let origin=panel_point(x,y);
+        let scale=hud_scale();
+        draw_texture_ex(texture,origin.x,origin.y,WHITE,DrawTextureParams{
+            dest_size:Some(vec2(w*scale,h*scale)),
+            ..Default::default()
+        });
+        true
     }
     pub fn draw(&self){
         let x=hud_x();
