@@ -10,7 +10,7 @@ mod resources;
 use game_core::{
     mission::{GameMap,Mission,parse_dvm,parse_mdb},
     rules::{parse_odb,merge_rules,rule_id},
-    sim::{Simulation,Entity,Task,animal_cycle_phase},
+    sim::{Simulation,Entity,Task,animal_cycle_phase,unit_idle_phase},
     terrain::{Terrain,generate_base},
 };
 use macroquad::prelude::*;
@@ -249,6 +249,10 @@ impl Game{
                 Task::Walking{..} if obj.carrying>0=>4,
                 Task::Gathering{..}|Task::Constructing{..}=>2,
                 Task::Holding{..}|Task::Delivering{..}=>4,
+                Task::Idle if obj.carrying==0
+                    && unit_idle_phase(obj.id,self.simulation.tick)<20
+                    && self.sprites.has_slot(
+                        rule_id(obj.group,obj.object_type),3,obj.facing)=>3,
                 _=>0,
             }
         }
@@ -638,7 +642,13 @@ impl Game{
                     Task::Gathering{time,..}=>(2,SpriteMotion::Loop(*time as u64)),
                     Task::Constructing{..}=>(2,SpriteMotion::Loop(self.simulation.tick)),
                     Task::Delivering{..}|Task::Holding{..}=>(4,SpriteMotion::Still),
-                    Task::Idle=>(0,SpriteMotion::Still),
+                    Task::Idle=>{
+                        if obj.carrying==0
+                            && unit_idle_phase(obj.id,self.simulation.tick)<20
+                            && self.sprites.has_slot(oid,3,obj.facing){
+                            (3,SpriteMotion::Loop(self.simulation.tick))
+                        }else{(0,SpriteMotion::Still)}
+                    },
                 }
             }else if obj.kind==1{
                 if obj.complete{(1,SpriteMotion::Still)}
