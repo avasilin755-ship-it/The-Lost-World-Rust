@@ -113,9 +113,29 @@ pub fn object_name<'a>(
 )->Cow<'a,str>{
     if lang==Language::English{return Cow::Borrowed(name)}
     let translated=match kind{
-        0=>match ty{11=>Some("Строитель"),_=>None},
-        1=>match ty{37=>Some("Жилой дом"),40=>Some("Ратуша"),
-            41=>Some("Склад"),_=>None},
+        // Same object type IDs mean the same role across all three races
+        // (see docs/formats/odb.md, "Groups and types").
+        0=>match ty{
+            9=>Some("Носильщик"),10=>Some("Основатель поселения"),
+            11=>Some("Строитель"),12=>Some("Преступник"),
+            13=>Some("Дипломат"),14=>Some("Земледелец"),
+            17=>Some("Охотник"),19=>Some("Лесоруб"),
+            20=>Some("Разносчик газет"),21=>Some("Полицейский"),
+            27=>Some("Каменотёс"),29=>Some("Лучник"),
+            _=>None,
+        },
+        1=>match ty{
+            37=>Some("Жилой дом"),38=>Some("Большой жилой дом"),
+            39=>Some("Казармы"),40=>Some("Ратуша"),
+            41=>Some("Склад"),42=>Some("Посольство"),
+            43=>Some("Военная мастерская"),44=>Some("Пищевое производство"),
+            46=>Some("Лаборатория"),48=>Some("Рынок"),
+            50=>Some("Шахта"),52=>Some("Малый форпост"),
+            53=>Some("Большой форпост"),54=>Some("Полицейский участок"),
+            55=>Some("Школа"),56=>Some("Магическая мастерская"),
+            61=>Some("Оружейная мастерская"),62=>Some("Порт"),
+            63=>Some("Верфь"),_=>None,
+        },
         2=>match class{
             7=>Some("Дикое животное"),8=>Some("Дерево"),
             9=>Some("Ягодный куст"),13=>Some("Каменное месторождение"),
@@ -155,6 +175,9 @@ mod tests{
         assert_eq!(object_name(Language::Russian,"Rathaus",1,40,0),"Ратуша");
         assert_eq!(object_name(Language::Russian,"Baumeister",0,11,0),"Строитель");
         assert_eq!(object_name(Language::Russian,"Example",2,42,8),"Дерево");
+        assert_eq!(object_name(Language::Russian,"Holzfäller",0,19,0),"Лесоруб");
+        assert_eq!(object_name(Language::Russian,"Botschaft",1,42,0),"Посольство");
+        assert_eq!(object_name(Language::Russian,"Unknown",1,999,0),"Unknown");
         assert_eq!(object_name(Language::English,"Rathaus",1,40,0),"Rathaus");
         assert_eq!(Language::Russian.toggle(),Language::English);
     }
