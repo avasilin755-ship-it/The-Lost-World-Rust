@@ -5,3 +5,4 @@
 
 pub mod gd;
 pub mod png;
+pub mod od;
