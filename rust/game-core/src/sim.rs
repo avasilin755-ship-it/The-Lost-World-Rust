@@ -1225,26 +1225,74 @@ mod tests{
         }
     }
     #[test]
-    fn construction_reserves_all_cells_and_debits_only_once(){
+    fn building_waits_for_materials_and_does_not_precharge_goods(){
         let mut sim=setup();
         sim.entity_mut(1).unwrap().object_type=11;
         sim.rules.insert(rule_id(2,37),house_rule(37));
         sim.goods[GOOD_WOOD]=3;sim.goods[GOOD_STONE]=2;
         let site=sim.build(1,rule_id(2,37),(25,25)).unwrap();
-        assert_eq!(sim.goods[GOOD_WOOD],0);
-        assert_eq!(sim.goods[GOOD_STONE],0);
+        assert_eq!(sim.goods[GOOD_WOOD],3);
+        assert_eq!(sim.goods[GOOD_STONE],2);
         assert_eq!(sim.can_build(1,rule_id(2,37),(30,30)),Err(GameError::Busy));
-        assert!(!sim.entity(site).unwrap().complete);
+        for _ in 0..400{sim.step()}
+        assert_eq!(sim.entity(site).unwrap().construction,0);
         let snap=sim.save_snapshot();
         let mut restored=setup();
         restored.rules=sim.rules.clone();
         restored.load_snapshot(&snap).unwrap();
         assert_eq!(restored.entity(1).unwrap().task,sim.entity(1).unwrap().task);
-        for _ in 0..400{restored.step()}
+        assert_eq!(restored.sites.get(&site),sim.sites.get(&site));
+        // A simulated external porter has now delivered the materials.
+        restored.sites.get_mut(&site).unwrap().stock[GOOD_WOOD]=3;
+        restored.sites.get_mut(&site).unwrap().stock[GOOD_STONE]=2;
+        for _ in 0..500{restored.step()}
         assert!(restored.entity(site).unwrap().complete);
         assert_eq!(restored.entity(site).unwrap().construction,100);
         assert_eq!(restored.can_build(1,rule_id(2,37),(25,25)),Err(GameError::Occupied));
-        assert_eq!(restored.can_build(1,rule_id(2,37),(30,30)),Err(GameError::NotEnoughGoods));
+        // Unlike the old prototype, the original allows placement with
+        // insufficient goods; the site will wait until supply arrives.
+        assert_eq!(restored.can_build(1,rule_id(2,37),(30,30)),Ok(()));
+    }
+    #[test]
+    fn porter_collects_exactly_one_unit_from_storage_and_delivers_it(){
+        let mut sim=setup();
+        sim.entity_mut(1).unwrap().object_type=11;
+        let mut house=house_rule(37);
+        house.cost=[0;9];house.cost[GOOD_WOOD]=1;
+        sim.rules.insert(rule_id(2,37),house);
+        let store_id=sim.next_id;sim.next_id+=1;
+        sim.objects.push(Entity{
+            id:store_id,kind:1,group:2,object_type:40,owner:2,
+            x:8,y:10,hp:100,complete:true,construction:100,
+            task:Task::Idle,carrying:0,facing:4
+        });
+        let porter_id=sim.next_id;sim.next_id+=1;
+        sim.objects.push(Entity{
+            id:porter_id,kind:0,group:2,object_type:9,owner:2,
+            x:7,y:10,hp:100,complete:true,construction:100,
+            task:Task::Idle,carrying:0,facing:4
+        });
+        sim.goods[GOOD_WOOD]=1;
+        let site=sim.build(1,rule_id(2,37),(17,17)).unwrap();
+        assert_eq!(sim.goods[GOOD_WOOD],1);
+        let mut observed_in_transit=false;
+        let mut observed_delivered=false;
+        for _ in 0..1200{
+            sim.step();
+            if sim.entity(porter_id).is_some_and(|o|o.carrying==1){
+                observed_in_transit=true;
+            }
+            if sim.sites.get(&site).is_some_and(|s|s.stock[GOOD_WOOD]==1){
+                observed_delivered=true;
+            }
+            if sim.entity(site).unwrap().complete{break}
+        }
+        assert!(observed_in_transit,"porter never picked up the wood");
+        assert!(observed_delivered,"wood never reached construction site");
+        assert!(sim.entity(site).unwrap().complete,"builder never finished");
+        assert_eq!(sim.goods[GOOD_WOOD],0);
+        assert_eq!(sim.entity(porter_id).unwrap().carrying,0);
+        assert!(!sim.sites.contains_key(&site));
     }
     #[test]
     fn only_original_builder_profession_can_place_buildings(){
@@ -1373,30 +1421,30 @@ mod tests{
         assert!(sim.consumption.food_fraction<0.01);
     }
     #[test]
-    fn tlwsnap5_persists_economy_and_tlwsnap4_remains_readable(){
+    fn tlwsnap6_persists_economy_and_tlwsnap4_remains_readable(){
         let mut sim=setup();
         sim.races_present=[true,false,true];
         sim.consumption.food_fraction=0.4;
         sim.consumption.luxury_fraction=[0.1,0.2,0.3];
         let snapshot=sim.save_snapshot();
-        assert!(snapshot.starts_with(b"TLWSNAP5"));
+        assert!(snapshot.starts_with(b"TLWSNAP6"));
         let mut loaded=setup();
         loaded.load_snapshot(&snapshot).unwrap();
         assert_eq!(loaded.races_present,[true,false,true]);
         assert_eq!(loaded.consumption,sim.consumption);
         let mut legacy=snapshot.clone();
         legacy[..8].copy_from_slice(b"TLWSNAP4");
-        legacy.truncate(legacy.len()-17);
+        legacy.truncate(legacy.len()-21);
         let mut old_loaded=setup();
         old_loaded.load_snapshot(&legacy).unwrap();
         assert_eq!(old_loaded.consumption,Consumption::default());
     }
     #[test]
-    fn snapshot_v5_restores_paved_foundations_and_rng_state(){
+    fn snapshot_v6_restores_paved_foundations_and_rng_state(){
         let mut sim=setup();
         sim.terrain.foundation(25,25,3,2);
         let snapshot=sim.save_snapshot();
-        assert!(snapshot.starts_with(b"TLWSNAP5"));
+        assert!(snapshot.starts_with(b"TLWSNAP6"));
         let mut loaded=setup();
         loaded.load_snapshot(&snapshot).unwrap();
         assert_eq!(loaded.terrain.height,sim.terrain.height);
