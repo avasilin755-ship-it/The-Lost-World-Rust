@@ -405,6 +405,7 @@ impl WorldArt{
         if let Some(p)=addon {archives.push(GdArchive::open(p)?)}
         Ok(Self{archives,cache:HashMap::new(),cache_clock:0})
     }
+    pub fn cache_size(&self)->usize{self.cache.len()}
     pub fn has_slot(&self,oid:u32,action:u8,facing:u8)->bool{
         self.archives.iter().rev().any(|archive|
             archive.od.get(&oid).is_some_and(|obj|obj.kind==0 &&
