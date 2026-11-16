@@ -322,6 +322,7 @@ impl Game{
         let mut simulation=Simulation::from_map(
             terrain,rules,map.objects.clone(),human,race.gold,race.goods
         ).map_err(|e|e.to_string())?;
+        simulation.races_present=std::array::from_fn(|i|mission.races[i].present);
         human_worker_if_needed(&mut simulation,&map.starts);
         let minimap_ground=minimap_ground_texture(&simulation.terrain,&ground,map.terrain.is_some());
         let sprites=WorldArt::open(base_gd,addon_gd)?;
