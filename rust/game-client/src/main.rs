@@ -86,6 +86,17 @@ fn tween_cell(tween:&SpriteTween,tick:u64,sub_tick:f32)->Vec2{
 /// Static minimap ground is uploaded to the GPU once per loaded map.
 /// Previously the client issued up to 65k individual mini-rect draws per frame.
 const MINI_PX:usize=152;
+fn minimap_world_from_pixel(
+    col:i32,row:i32,scroll:(i32,i32),map_size:i32,
+)->(i32,i32){
+    let pixels=MINI_PX as i32;
+    let source_col=(col+scroll.0).rem_euclid(pixels);
+    let source_row=(row+scroll.1).rem_euclid(pixels);
+    (
+        ((source_row*map_size+pixels/2)/pixels).rem_euclid(map_size),
+        ((source_col*map_size+pixels/2)/pixels).rem_euclid(map_size)
+    )
+}
 /// The original game's minimap has a 152x152 *transposed* image.
 /// Each tile contributes its average OS texture colour; neighbouring
 /// source pixels overlap, then relief shading and 3x3 Gaussian blur.
@@ -258,6 +269,9 @@ struct Game {
     lang:Language,
     ui:ClassicUi,
     show_debug:bool,
+    perf_update_ms:f32,
+    perf_world_ms:f32,
+    perf_hud_ms:f32,
     last_positions:HashMap<u32,(i32,i32)>,
     tweens:HashMap<u32,SpriteTween>,
 }
@@ -336,6 +350,7 @@ impl Game{
             minimap:true,stored:map.terrain.is_some(),save_file,toast:None,
             left_press:None,right_press:None,last_click:None,
             ui_font,lang,ui,show_debug:false,
+            perf_update_ms:0.0,perf_world_ms:0.0,perf_hud_ms:0.0,
             last_positions,tweens:HashMap::new(),
         })
     }
@@ -1062,12 +1077,7 @@ impl Game{
         let col=((p.x-x)/w*MINI_PX as f32).floor() as i32;
         let row=((p.y-y)/h*MINI_PX as f32).floor() as i32;
         // Mouse horizontal offset means world Y, vertical means world X.
-        let source_col=(col+sx).rem_euclid(MINI_PX as i32);
-        let source_row=(row+sy).rem_euclid(MINI_PX as i32);
-        Some((
-            ((source_row*n+76)/MINI_PX as i32).rem_euclid(n),
-            ((source_col*n+76)/MINI_PX as i32).rem_euclid(n)
-        ))
+        Some(minimap_world_from_pixel(col,row,(sx,sy),n))
     }
     fn draw_selection_marquee(&self){
         if self.selected.build.is_some(){return}
@@ -1093,6 +1103,13 @@ impl Game{
                 measure_text(&message,self.ui_font.as_ref(),16,1.0).width+22.0,
                 28.0,Color::from_rgba(15,22,19,207));
             self.draw_ui(&message,17.0,76.0,16.0,GOLD);
+            let timing=format!(
+                "CPU  update {:.1} ms  |  world {:.1} ms  |  HUD {:.1} ms",
+                self.perf_update_ms,self.perf_world_ms,self.perf_hud_ms,
+            );
+            draw_rectangle(8.0,85.0,495.0,27.0,
+                Color::from_rgba(15,22,19,207));
+            self.draw_ui(&timing,17.0,105.0,15.0,GOLD);
         }
     }
     async fn run(mut self){
@@ -1106,11 +1123,22 @@ impl Game{
         loop{
             #[cfg(all(not(target_arch="wasm32"),not(target_os="android")))]
             let frame_start=std::time::Instant::now();
+            let t0=get_time();
             self.update();
+            let t1=get_time();
             clear_background(Color::from_rgba(26,42,37,255));
             self.draw_world();
             self.draw_selection_marquee();
+            let t2=get_time();
             self.draw_hud();
+            let t3=get_time();
+            let filter=0.12;
+            self.perf_update_ms=self.perf_update_ms*(1.0-filter)
+                +((t1-t0)*1000.0) as f32*filter;
+            self.perf_world_ms=self.perf_world_ms*(1.0-filter)
+                +((t2-t1)*1000.0) as f32*filter;
+            self.perf_hud_ms=self.perf_hud_ms*(1.0-filter)
+                +((t3-t2)*1000.0) as f32*filter;
             #[cfg(all(not(target_arch="wasm32"),not(target_os="android")))]
             {
                 let elapsed=frame_start.elapsed();
@@ -1160,6 +1188,13 @@ async fn main(){
 #[cfg(test)]
 mod motion_tests{
     use super::*;
+    #[test]
+    fn minimap_clicks_are_transposed_and_camera_relative(){
+        assert_eq!(minimap_world_from_pixel(76,76,(0,0),128),(64,64));
+        assert_eq!(minimap_world_from_pixel(0,76,(0,0),128),(64,0));
+        assert_eq!(minimap_world_from_pixel(76,0,(0,0),128),(0,64));
+        assert_eq!(minimap_world_from_pixel(0,0,(151,151),128),(127,127));
+    }
     #[test]
     fn toroidal_entity_projection_is_camera_relative(){
         assert_eq!(nearest_periodic_axis(1.0,126.0,128.0),129.0);
