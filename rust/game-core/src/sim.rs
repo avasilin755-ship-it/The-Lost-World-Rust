@@ -518,6 +518,106 @@ impl Simulation {
             self.entity_mut(unit).unwrap().task=Task::Holding{good,amount};
         }
     }
+    /// Count already dispatched construction material, including travel
+    /// towards the store and the return trip. No duplicate requests.
+    fn site_in_flight(&self,site:u32)->[i32;9]{
+        let mut count=[0;9];
+        for worker in &self.objects {
+            if worker.kind!=0{continue}
+            match &worker.task {
+                Task::Walking{after:After::Fetch(s,_,good),..}
+                    if *s==site&&*good<9=>count[*good]+=1,
+                Task::Fetching{site:s,good,..}
+                    if *s==site&&*good<9=>count[*good]+=1,
+                Task::Walking{after:After::Deliver(s,good,amount),..}
+                    if *s==site&&*good<9=>count[*good]+=*amount,
+                Task::Delivering{storage:s,good,amount}
+                    if *s==site&&*good<9=>count[*good]+=*amount,
+                _=>{}
+            }
+        }
+        count
+    }
+    /// Port one unit per transporter trip, as in the original game. We do
+    /// not withdraw goods until a porter arrives at the source building.
+    /// Pathing is provisional (no original store door queue yet).
+    fn dispatch_site_materials(&mut self){
+        let site_ids:Vec<u32>=self.sites.keys().copied().collect();
+        for site in site_ids{
+            let Some(target)=self.entity(site) else{continue};
+            if target.complete{continue}
+            let (pos,required) = ((target.x,target.y),
+                self.sites[&site].remaining);
+            let local=self.sites[&site].stock;
+            let mut transit=self.site_in_flight(site);
+            for good in 0..9 {
+                while required[good]>local[good]+transit[good]
+                    && self.goods[good]>0
+                {
+                    let workers:Vec<u32>=self.objects.iter()
+                        .filter(|o|o.kind==0&&o.group==self.human_race
+                            &&o.object_type==9
+                            &&o.carrying==0&&matches!(o.task,Task::Idle))
+                        .map(|o|o.id).collect();
+                    let mut dispatched=false;
+                    for porter in workers{
+                        let Some(source)=self.entity(porter).map(|o|(o.x,o.y))
+                            else{continue};
+                        let Some(store)=self.nearest_storage(source) else{break};
+                        let Some(storage)=self.entity(store) else{continue};
+                        let at=(storage.x,storage.y);
+                        let dims=self.rule(storage).map_or((1,1),|r|
+                            (r.size_x.clamp(1,32),r.size_y.clamp(1,32))
+                        );
+                        if let Ok(path)=self.adjacent_to_footprint(
+                            porter,at,dims.0,dims.1
+                        ){
+                            self.entity_mut(porter).unwrap().task=Task::Walking{
+                                steps:path,after:After::Fetch(site,store,good)
+                            };
+                            transit[good]+=1;
+                            dispatched=true;
+                            break
+                        }
+                    }
+                    if !dispatched{break}
+                }
+            }
+            let _=pos; // site location is read again when a porter arrives
+        }
+    }
+    /// Arrive at a completed store; pick up exactly one town good, then
+    /// head to the perimeter of the unfinished construction footprint.
+    fn fetch_for_site(
+        &mut self,worker:u32,site:u32,storage:u32,good:usize
+    ){
+        let valid=self.sites.contains_key(&site)
+            && self.entity(site).is_some_and(|o|!o.complete)
+            && self.entity(storage).is_some_and(|o|o.complete)
+            && good<9&&self.goods[good]>0;
+        if !valid{
+            if let Some(o)=self.entity_mut(worker){o.task=Task::Idle}
+            return
+        }
+        let Some(target)=self.entity(site) else{return};
+        let at=(target.x,target.y);
+        let dims=self.rule(target).map_or((1,1),|r|
+            (r.size_x.clamp(1,32),r.size_y.clamp(1,32))
+        );
+        let route=self.adjacent_to_footprint(worker,at,dims.0,dims.1);
+        if let Ok(steps)=route{
+            self.goods[good]-=1;
+            if let Some(o)=self.entity_mut(worker){
+                o.carrying=1;
+                o.task=Task::Walking{
+                    steps,after:After::Deliver(site,good,1)
+                };
+            }
+        }else if let Some(o)=self.entity_mut(worker){
+            o.task=Task::Idle;
+        }
+    }
+
     /// Deterministic fixed-time simulation. Path speed is temporarily
     /// 6 ticks per tile and resource output is provisional, not vanilla exact.
     pub fn step(&mut self){
@@ -595,6 +695,9 @@ impl Simulation {
                         self.objects[i].task=match after{
                             After::Idle=>Task::Idle,
                             After::Gather(tree)=>Task::Gathering{tree,time:0},
+                            After::Fetch(site,storage,good)=>Task::Fetching{
+                                site,storage,good
+                            },
                             After::Deliver(storage,good,amount)=>Task::Delivering{storage,good,amount},
                             After::Construct(site)=>Task::Constructing{site},
                             After::Hold(good,amount)=>Task::Holding{good,amount},
@@ -619,8 +722,19 @@ impl Simulation {
                         self.start_delivery(id,good,amount);
                     }
                 }
+                Task::Fetching{site,storage,good}=>{
+                    self.fetch_for_site(id,site,storage,good);
+                }
                 Task::Delivering{storage,good,amount}=>{
-                    if self.entity(storage).is_some_and(|o|o.complete){
+                    if let Some(site)=self.sites.get_mut(&storage){
+                        if good<9{
+                            site.stock[good]=site.stock[good].saturating_add(amount);
+                        }
+                        self.objects[i].carrying=0;
+                        self.objects[i].task=Task::Idle;
+                    }else if self.entity(storage).is_some_and(|o|
+                        o.complete&&o.kind==1&&(o.object_type==40||o.object_type==41)
+                    ){
                         self.goods[good]=self.goods[good].saturating_add(amount);
                         self.objects[i].carrying=0;
                         self.objects[i].task=Task::Idle;
@@ -634,36 +748,41 @@ impl Simulation {
                     }
                 }
                 Task::Constructing{site}=>{
-                    // Original builder: work and material actions are polled
-                    // every 15 ticks; a building has at least 10 work ticks.
-                    // We preserve source-like TOTAL duration (materials +
-                    // work) and ten animation stages. Porter deliveries and
-                    // per-good site stock are not yet modelled separately.
+                    if self.tick%15!=0{continue}
                     let Some(target)=self.entity(site) else{
                         self.objects[i].task=Task::Idle;continue
                     };
-                    let Some(rule)=self.rule(target) else{
+                    let full_hp=self.rule(target).map_or(1,|r|r.hp.max(1));
+                    let Some(supply)=self.sites.get_mut(&site) else{
                         self.objects[i].task=Task::Idle;continue
                     };
-                    let total:usize=rule.cost.iter().map(|&v|v.max(0) as usize).sum();
-                    let work=total.max(10);
-                    let interval=((work+total)*15/10).max(15) as u64;
-                    let full_hp=rule.hp.max(1);
-                    if self.tick%interval!=0{continue}
-                    if let Some(building)=self.entity_mut(site){
-                        building.construction=(building.construction+10).min(100);
-                        building.hp=((i32::from(building.construction)*full_hp)/100)
-                            .clamp(1,full_hp);
-                        if building.construction==100{
-                            building.complete=true;
-                            self.objects[i].task=Task::Idle;
+                    // In the original, one material is consumed first,
+                    // followed by a work step 15 ticks later. A builder
+                    // waits without advancing progress when stock is empty.
+                    if supply.work_step(){
+                        let progress=u32::from(supply.work_done)*100
+                            /u32::from(supply.work_total);
+                        if let Some(building)=self.entity_mut(site){
+                            building.construction=progress as u16;
+                            building.hp=((progress as i32*full_hp)/100)
+                                .clamp(1,full_hp);
+                            if supply.work_done==supply.work_total{
+                                building.complete=true;
+                                self.objects[i].task=Task::Idle;
+                            }
                         }
-                    }else{self.objects[i].task=Task::Idle}
+                    }
                 }
             }
         }
         if !removed.is_empty(){
             self.objects.retain(|o|!removed.contains(&o.id));
+        }
+        self.sites.retain(|site,_|
+            self.objects.iter().any(|o|o.id==*site&&!o.complete)
+        );
+        if self.tick%15==0{
+            self.dispatch_site_materials();
         }
         // First live economy subsystem: food/luxury every 299 ticks.
         // Population is currently approximated by the active outdoor
