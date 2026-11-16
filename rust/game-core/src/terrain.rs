@@ -55,6 +55,42 @@ impl Terrain{
         this.compute_light();
         Ok(this)
     }
+    /// Original foundation routine (world.ts and terrain-gen.md):
+    /// buildings flatten their footprint plus one outer ring to the mean
+    /// outer-ring height, then pave the whole rectangle with 'weg' tiles.
+    /// This is permanent and is NOT undone when a building disappears.
+    pub fn foundation(&mut self,x:i32,y:i32,size_x:i32,size_y:i32){
+        let sx=size_x.clamp(1,32);
+        let sy=size_y.clamp(1,32);
+        let mut sum=0u64;
+        let mut count=0u64;
+        for yy in y-sy..=y+1{
+            for xx in x-sx..=x+1{
+                let inner=xx>x-sx && xx<=x && yy>y-sy && yy<=y;
+                if inner{continue}
+                sum+=u64::from(self.height[self.index(xx,yy)]);
+                count+=1;
+            }
+        }
+        if count==0{return}
+        let level=(sum/count) as u16;
+        let path_class=if self.water_class==11{CLASS_PATH}else{0};
+        let mut random=MsRand{state:self.rng_state};
+        for xx in (x-sx..=x+1).rev(){
+            for yy in (y-sy..=y+1).rev(){
+                let i=self.index(xx,yy);
+                self.height[i]=level;
+                if self.class[i]!=path_class{
+                    self.class[i]=path_class;
+                    self.tile[i]=(random.next_rand()%8) as u8;
+                }
+            }
+        }
+        self.rng_state=random.state;
+        // A future optimization will relight only the expanded foundation
+        // rectangle. Until then, the deterministic full relight is correct.
+        self.compute_light();
+    }
     pub fn compute_light(&mut self){
         for y in 0..self.size as i32{
             for x in 0..self.size as i32{
@@ -214,6 +250,27 @@ mod tests{
         assert_eq!(light_value(0,0),162);
         assert_eq!(light_value(8,0),210);
         assert_eq!(light_value(-8,0),128);
+    }
+    #[test]
+    fn foundation_levels_building_and_paves_outer_ring(){
+        let n=128usize;
+        let mut t=Terrain{
+            size_bits:7,size:n,height:vec![128;n*n],
+            class:vec![0;n*n],tile:vec![0;n*n],
+            light:vec![162;n*n],rng_state:1,water_class:CLASS_WATER
+        };
+        let extra=t.index(12,13);
+        t.height[extra]=140;
+        t.foundation(12,12,2,2);
+        let level=t.height[t.index(12,12)];
+        assert!(level>=128&&level<=140);
+        for y in 10..=13{
+            for x in 10..=13{
+                let i=t.index(x,y);
+                assert_eq!(t.height[i],level);
+                assert_eq!(t.class[i],CLASS_PATH);
+            }
+        }
     }
     #[test]
     fn generate_reproducible_original_base_map(){
