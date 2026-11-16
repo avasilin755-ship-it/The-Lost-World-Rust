@@ -803,10 +803,10 @@ impl Simulation {
             .map(|o|o.id).collect()
     }
 
-    /// TLWSNAP5 extends V4 with food/luxury fractions and participating
-    /// races. Versions 1-4 remain readable for backwards compatibility.
+    /// TLWSNAP6 adds porter/source transport tasks and per-site material
+    /// stocks. Prior versions 1-5 remain loadable for backwards compatibility.
     pub fn save_snapshot(&self)->Vec<u8>{
-        let mut b=b"TLWSNAP5".to_vec();
+        let mut b=b"TLWSNAP6".to_vec();
         b.extend_from_slice(&self.tick.to_le_bytes());
         b.push(u8::from(self.paused));
         b.extend_from_slice(&self.gold.to_le_bytes());
@@ -849,6 +849,12 @@ impl Simulation {
                             b.extend_from_slice(&(*good as u32).to_le_bytes());
                             b.extend_from_slice(&amount.to_le_bytes());
                         }
+                        After::Fetch(site,source,good)=>{
+                            b.push(5);
+                            b.extend_from_slice(&site.to_le_bytes());
+                            b.extend_from_slice(&source.to_le_bytes());
+                            b.extend_from_slice(&(*good as u32).to_le_bytes());
+                        }
                     }
                 }
                 Task::Gathering{tree,time}=>{
@@ -870,6 +876,12 @@ impl Simulation {
                     b.extend_from_slice(&(*good as u32).to_le_bytes());
                     b.extend_from_slice(&amount.to_le_bytes());
                 }
+                Task::Fetching{site,storage,good}=>{
+                    b.push(6);
+                    b.extend_from_slice(&site.to_le_bytes());
+                    b.extend_from_slice(&storage.to_le_bytes());
+                    b.extend_from_slice(&(*good as u32).to_le_bytes());
+                }
             }
         }
         b.extend_from_slice(&self.terrain.rng_state.to_le_bytes());
@@ -888,6 +900,15 @@ impl Simulation {
             if *present{race_mask|=1<<i}
         }
         b.push(race_mask);
+        b.extend_from_slice(&(self.sites.len() as u32).to_le_bytes());
+        for (&id,site) in &self.sites{
+            b.extend_from_slice(&id.to_le_bytes());
+            for &v in &site.remaining{b.extend_from_slice(&v.to_le_bytes())}
+            for &v in &site.stock{b.extend_from_slice(&v.to_le_bytes())}
+            b.extend_from_slice(&site.work_done.to_le_bytes());
+            b.extend_from_slice(&site.work_total.to_le_bytes());
+            b.push(u8::from(site.ready_for_work));
+        }
         b
     }
     pub fn load_snapshot(&mut self,b:&[u8])->Result<(),GameError>{
@@ -895,7 +916,8 @@ impl Simulation {
             return Err(GameError::Invalid("invalid snapshot header"))
         }
         let legacy=&b[..8]==b"TLWSNAP1";
-        let version5=&b[..8]==b"TLWSNAP5";
+        let version6=&b[..8]==b"TLWSNAP6";
+        let version5=&b[..8]==b"TLWSNAP5"||version6;
         let version4=&b[..8]==b"TLWSNAP4"||version5;
         let version3=&b[..8]==b"TLWSNAP3"||version4;
         if !legacy && !version3 && &b[..8]!=b"TLWSNAP2"{
@@ -969,6 +991,13 @@ impl Simulation {
                                 if good>=9||amount<0{return Err(GameError::Invalid("invalid cargo"))}
                                 After::Hold(good,amount)
                             }
+                            5 if version6=>{
+                                let site=u32::from_le_bytes(take(4)?.try_into().unwrap());
+                                let source=u32::from_le_bytes(take(4)?.try_into().unwrap());
+                                let good=u32::from_le_bytes(take(4)?.try_into().unwrap()) as usize;
+                                if good>=9{return Err(GameError::Invalid("invalid fetch good"))}
+                                After::Fetch(site,source,good)
+                            }
                             _=>return Err(GameError::Invalid("unknown after-task tag"))
                         };
                         Task::Walking{steps,after}
@@ -994,6 +1023,13 @@ impl Simulation {
                         let amount=i32::from_le_bytes(take(4)?.try_into().unwrap());
                         if good>=9||amount<0{return Err(GameError::Invalid("invalid cargo"))}
                         Task::Holding{good,amount}
+                    }
+                    6 if version6=>{
+                        let site=u32::from_le_bytes(take(4)?.try_into().unwrap());
+                        let storage=u32::from_le_bytes(take(4)?.try_into().unwrap());
+                        let good=u32::from_le_bytes(take(4)?.try_into().unwrap()) as usize;
+                        if good>=9{return Err(GameError::Invalid("invalid fetch good"))}
+                        Task::Fetching{site,storage,good}
                     }
                     _=>return Err(GameError::Invalid("unknown task tag"))
                 }
@@ -1041,11 +1077,71 @@ impl Simulation {
                 food_fraction:food,luxury_fraction:lux
             },races))
         }else{None};
+        let saved_sites=if version6{
+            let count=u32::from_le_bytes(take(4)?.try_into().unwrap()) as usize;
+            if count>MAX_ENTITIES{return Err(GameError::Invalid("too many construction sites"))}
+            let mut sites=BTreeMap::new();
+            for _ in 0..count{
+                let id=u32::from_le_bytes(take(4)?.try_into().unwrap());
+                if !objects.iter().any(|o|o.id==id&&o.kind==1&&!o.complete)
+                    ||sites.contains_key(&id){
+                    return Err(GameError::Invalid("invalid construction site"))
+                }
+                let mut remaining=[0i32;9];
+                let mut stock=[0i32;9];
+                for v in &mut remaining{
+                    *v=i32::from_le_bytes(take(4)?.try_into().unwrap());
+                }
+                for v in &mut stock{
+                    *v=i32::from_le_bytes(take(4)?.try_into().unwrap());
+                }
+                if remaining.iter().chain(stock.iter()).any(|&v|
+                    !(0..=100_000).contains(&v)
+                ){return Err(GameError::Invalid("invalid construction stock"))}
+                let work_done=u16::from_le_bytes(take(2)?.try_into().unwrap());
+                let work_total=u16::from_le_bytes(take(2)?.try_into().unwrap());
+                let ready_for_work=match take(1)?[0]{
+                    0=>false,1=>true,_=>return Err(GameError::Invalid("invalid site phase"))
+                };
+                if work_total<10||work_total>10_000||work_done>work_total{
+                    return Err(GameError::Invalid("invalid site work progress"))
+                }
+                sites.insert(id,SiteLogistics{
+                    remaining,stock,work_done,work_total,ready_for_work
+                });
+            }
+            Some(sites)
+        }else{None};
         if pos!=b.len()||next_id<=ids.iter().copied().max().unwrap_or(0){
             return Err(GameError::Invalid("snapshot trailing data or invalid next id"))
         }
         self.tick=tick;self.gold=gold;self.goods=goods;self.next_id=next_id;
         self.objects=objects;self.paused=paused;
+        self.sites=if let Some(sites)=saved_sites{sites}else{
+            // Legacy TLWSNAP1-5 have no physical site-stock ledger.
+            // Their placement had already deducted all material costs.
+            // Reconstruct an in-site stock from the unfinished amount
+            // so their previously saved builder tasks keep working.
+            let mut sites=BTreeMap::new();
+            for obj in &self.objects{
+                if obj.kind!=1||obj.complete{continue}
+                let cost=self.rules.get(&rule_id(obj.group,obj.object_type))
+                    .map_or([0;9],|r|r.cost);
+                let mut entry=SiteLogistics::new(cost);
+                entry.work_done=((obj.construction as u32
+                    *u32::from(entry.work_total)+50)/100)
+                    .min(u32::from(entry.work_total)) as u16;
+                let mut consumed=i32::from(entry.work_done);
+                for good in 0..9{
+                    let used=consumed.min(entry.remaining[good]);
+                    entry.remaining[good]-=used;
+                    consumed-=used;
+                    entry.stock[good]=entry.remaining[good];
+                }
+                sites.insert(obj.id,entry);
+            }
+            sites
+        };
         if let Some((consumption,races))=saved_economy{
             self.consumption=consumption;
             self.races_present=races;
