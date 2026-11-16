@@ -839,104 +839,118 @@ impl Game{
         draw_rectangle_lines(x,y,w,h,1.5,GOLD);
     }
     fn draw_hud(&self){
-        let sw=screen_width();let sh=screen_height();
+        let sw=screen_width();
+        let sh=screen_height();
         let side_x=sw-SIDE;
+        let ru=self.lang==Language::Russian;
         draw_rectangle(0.0,0.0,sw,TOP,Color::from_rgba(20,29,25,255));
-        draw_text("THE LOST WORLD  |  RUST EDITION",20.0,38.0,29.0,GOLD);
+        self.draw_ui(tr(self.lang,Key::GameTitle),20.0,37.0,28.0,GOLD);
         if side_x>850.0{
-            draw_text(&format!("FPS: {} | GD CACHE: {}",
+            self.draw_ui(&format!("FPS: {} | GD: {}",
                 get_fps(),self.sprites.cache_size()),
-                side_x-250.0,38.0,17.0,LIGHTGRAY);
+                side_x-235.0,36.0,16.0,LIGHTGRAY);
         }
-        draw_text(
-            &format!("GOLD: {}     WOOD: {}     STONE: {}     FOOD: {}     TICK: {}     {}",
-                self.simulation.gold,self.simulation.goods[1],
-                self.simulation.goods[2],self.simulation.goods[4],
-                self.simulation.tick,
-                if self.simulation.paused{"PAUSED"}else{"RUNNING"}),
-            20.0,72.0,22.0,WHITE
+        let status=format!(
+            "{}: {}   {}: {}   {}: {}   {}: {}   {}: {}   {}",
+            tr(self.lang,Key::Gold),self.simulation.gold,
+            tr(self.lang,Key::Wood),self.simulation.goods[1],
+            tr(self.lang,Key::Stone),self.simulation.goods[2],
+            tr(self.lang,Key::Food),self.simulation.goods[4],
+            tr(self.lang,Key::Tick),self.simulation.tick,
+            tr(self.lang,if self.simulation.paused{Key::Paused}else{Key::Running})
         );
+        self.draw_ui(&status,20.0,73.0,18.0,WHITE);
         draw_rectangle(side_x,TOP,SIDE,sh-TOP,Color::from_rgba(26,36,30,255));
-        draw_text("CAMPAIGN",side_x+16.0,TOP+35.0,23.0,GOLD);
-        let title=&self.mission.title;
-        let title=if title.chars().count()>30 {
+        self.draw_ui(tr(self.lang,Key::Campaign),side_x+16.0,TOP+35.0,23.0,GOLD);
+        let title=localization::mission_title(self.lang,&self.mission.title);
+        let name=if title.chars().count()>30{
             title.chars().take(27).collect::<String>()+"..."
-        }else{title.clone()};
-        draw_text(&title,side_x+16.0,TOP+66.0,18.0,WHITE);
-        draw_text(
-            &format!("Map: {}x{}  |  Race {}",
+        }else{title.to_string()};
+        self.draw_ui(&name,side_x+16.0,TOP+66.0,17.0,WHITE);
+        let race=match (self.lang,self.simulation.human_race){
+            (Language::Russian,0)=>"Амазонки",
+            (Language::Russian,1)=>"Пиммоны",
+            (Language::Russian,2)=>"Саджики",
+            (Language::English,0)=>"Amazons",
+            (Language::English,1)=>"Pimmons",
+            (Language::English,2)=>"Sajiki",
+            _=>"?",
+        };
+        self.draw_ui(
+            &format!("{}: {}×{} | {}: {}",
+                tr(self.lang,Key::Map),
                 self.simulation.terrain.size,self.simulation.terrain.size,
-                self.simulation.human_race),
-            side_x+16.0,TOP+92.0,16.0,LIGHTGRAY
+                tr(self.lang,Key::Race),race),
+            side_x+16.0,TOP+94.0,16.0,LIGHTGRAY
         );
         draw_line(side_x+10.0,TOP+110.0,sw-10.0,TOP+110.0,1.0,GRAY);
-        draw_text("BUILD MENU",side_x+16.0,TOP+142.0,22.0,GOLD);
-        for (i,ty,name) in [(0,37,"1 - HOUSE"),(1,40,"2 - TOWN HALL"),
-            (2,41,"3 - WAREHOUSE")]{
+        self.draw_ui(tr(self.lang,Key::BuildMenu),side_x+16.0,TOP+141.0,22.0,GOLD);
+        for (i,ty,key) in [(0,37,Key::House),(1,40,Key::TownHall),
+            (2,41,Key::Warehouse)]{
             let y=TOP+170.0+i as f32*43.0;
             let active=self.selected.build==Some(ty);
             draw_rectangle(side_x+12.0,y,SIDE-24.0,34.0,
                 if active{Color::from_rgba(88,93,52,255)}
                 else{Color::from_rgba(49,60,43,255)});
-            draw_text(name,side_x+23.0,y+24.0,20.0,WHITE);
+            self.draw_ui(tr(self.lang,key),side_x+20.0,y+23.0,17.0,WHITE);
             if let Some(rule)=self.simulation.rules.get(
                 &rule_id(self.simulation.human_race,ty)){
-                let costs=format!("W{} S{} F{}",
-                    rule.cost[1].max(0),rule.cost[2].max(0),rule.cost[4].max(0));
-                draw_text(&costs,side_x+174.0,y+24.0,13.0,LIGHTGRAY);
+                let cost=if ru{
+                    format!("Д{} К{} Е{}",rule.cost[1].max(0),
+                        rule.cost[2].max(0),rule.cost[4].max(0))
+                }else{
+                    format!("W{} S{} F{}",rule.cost[1].max(0),
+                        rule.cost[2].max(0),rule.cost[4].max(0))
+                };
+                self.draw_ui(&cost,side_x+174.0,y+23.0,12.0,LIGHTGRAY);
             }
         }
-        draw_text("0 - CANCEL BUILD",side_x+17.0,TOP+323.0,17.0,LIGHTGRAY);
-        draw_text(&format!("SELECTED ({})",
-            self.selected.units.len().max(usize::from(self.selected.object.is_some()))),
+        self.draw_ui(tr(self.lang,Key::CancelBuild),side_x+17.0,
+            TOP+323.0,17.0,LIGHTGRAY);
+        let selected_count=self.selected.units.len().max(
+            usize::from(self.selected.object.is_some()));
+        self.draw_ui(&format!("{} ({})",tr(self.lang,Key::Selected),selected_count),
             side_x+16.0,TOP+372.0,22.0,GOLD);
         if let Some(id)=self.selected.object{
             if let Some(o)=self.simulation.entity(id){
-                let name=self.simulation.rule(o)
-                    .map_or("UNKNOWN",|r|r.name.as_str());
-                let shown=if name.chars().count()>24{
-                    name.chars().take(24).collect::<String>()
-                }else{name.to_owned()};
-                draw_text(&shown,side_x+16.0,TOP+403.0,19.0,WHITE);
-                draw_text(&format!("Type {} | HP {} | {},{}",
-                    o.object_type,o.hp,o.x,o.y),
-                    side_x+16.0,TOP+428.0,17.0,LIGHTGRAY);
-                let task=match &o.task {
-                    Task::Idle=>"Idle",
-                    Task::Walking{..}=>"Moving",
-                    Task::Gathering{..}=>"Gathering",
-                    Task::Delivering{..}=>"Delivering",
-                    Task::Constructing{..}=>"Building",
-                    Task::Holding{..}=>"Carrying / no storage",
-                };
-                draw_text(&format!("Task: {task}"),side_x+16.0,TOP+454.0,
-                    17.0,YELLOW);
-                if o.kind==1 && !o.complete{
-                    draw_text(&format!("Construction: {}%",o.construction),
-                        side_x+16.0,TOP+478.0,17.0,ORANGE);
+                let rule=self.simulation.rule(o);
+                let label=localization::object_name(
+                    self.lang,rule.map_or("UNKNOWN",|r|r.name.as_str()),
+                    o.kind,o.object_type,rule.map_or(-1,|r|r.class));
+                let shown=if label.chars().count()>27{
+                    label.chars().take(24).collect::<String>()+"..."
+                }else{label.to_string()};
+                self.draw_ui(&shown,side_x+16.0,TOP+403.0,18.0,WHITE);
+                self.draw_ui(&format!("{} {} | {} {} | {},{}",
+                    tr(self.lang,Key::Type),o.object_type,
+                    tr(self.lang,Key::Health),o.hp,o.x,o.y),
+                    side_x+16.0,TOP+429.0,15.0,LIGHTGRAY);
+                self.draw_ui(&format!("{}: {}",
+                    tr(self.lang,Key::Task),
+                    localization::task_name(self.lang,&o.task)),
+                    side_x+16.0,TOP+455.0,17.0,YELLOW);
+                if o.kind==1&&!o.complete{
+                    self.draw_ui(&format!("{}: {}%",
+                        tr(self.lang,Key::Progress),o.construction),
+                        side_x+16.0,TOP+479.0,17.0,ORANGE);
                 }
             }
         }else{
-            draw_text("Click a unit or object",side_x+16.0,TOP+403.0,18.0,WHITE);
+            self.draw_ui(tr(self.lang,Key::ChooseObject),
+                side_x+16.0,TOP+403.0,17.0,WHITE);
         }
         if let Some((x,y,w,h))=self.minimap_bounds(){
             self.minimap(x,y,w,h);
         }
         draw_rectangle(0.0,sh-FOOT,sw,FOOT,Color::from_rgba(17,25,22,255));
-        draw_text(
-            "LMB SELECT / DRAG GROUP    SHIFT ADD / CTRL TOGGLE    RMB ORDER    WASD PAN",
-            14.0,sh-30.0,19.0,LIGHTGRAY
-        );
-        draw_text(
-            "WHEEL ZOOM    PGUP/PGDN ZOOM    P PAUSE    X DROP CARGO    F4 MAP    F5/F9 SAVE/LOAD",
-            14.0,sh-10.0,16.0,GRAY
-        );
+        self.draw_ui(tr(self.lang,Key::Help1),14.0,sh-30.0,18.0,LIGHTGRAY);
+        self.draw_ui(tr(self.lang,Key::Help2),14.0,sh-10.0,15.0,GRAY);
         if let Some((message,until))=&self.toast{
             if get_time()<*until{
-                let box_width=message.len().min(70) as f32*11.0+20.0;
-                draw_rectangle(18.0,TOP+20.0,box_width,42.0,
+                let w=measure_text(message,self.ui_font.as_ref(),19,1.0).width+28.0;
+                draw_rectangle(18.0,TOP+20.0,w.min(sw-SIDE-30.0),42.0,
                     Color::from_rgba(18,26,22,240));
-                draw_text(message,27.0,TOP+49.0,20.0,YELLOW);
+                self.draw_ui(message,27.0,TOP+49.0,19.0,YELLOW);
             }
         }
     }
