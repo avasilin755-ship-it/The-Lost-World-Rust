@@ -12,6 +12,7 @@ use std::{cmp::Reverse, collections::{BinaryHeap, HashMap, HashSet}};
 
 pub const GOOD_WOOD:usize=1;
 pub const GOOD_STONE:usize=2;
+pub const GOOD_FOOD:usize=4;
 pub const MAX_ENTITIES:usize=50_000;
 const NEIGHBOURS:[(i32,i32);8]=[
     (-1,-1),(-1,0),(-1,1),(0,-1),(0,1),(1,-1),(1,0),(1,1)
@@ -195,6 +196,9 @@ impl Simulation {
         if !self.unit_owned(unit){return Err(GameError::NotOwned)}
         let target=self.entity(tree).ok_or(GameError::MissingObject)?;
         if target.kind!=2{return Err(GameError::Invalid("target must be nature"))}
+        if self.harvest_yield(tree).is_none(){
+            return Err(GameError::Invalid("this nature object is not a gatherable resource"))
+        }
         let at=(target.x,target.y);
         let path=self.nearest_adjacent(unit,at)?;
         self.entity_mut(unit).unwrap().task=Task::Walking{
@@ -246,19 +250,31 @@ impl Simulation {
         }).min_by_key(|o|self.distance_heuristic(from.0,from.1,(o.x,o.y)))
             .map(|o|o.id)
     }
-    fn start_delivery(&mut self,unit:u32,amount:i32){
+    fn harvest_yield(&self,id:u32)->Option<(usize,i32)>{
+        let nature=self.entity(id)?;
+        if nature.kind!=2{return None}
+        // ODB behaviour classes: 8 trees, 9 bushes, 13 stone.
+        // Synthetic test fixtures without an ODB rule represent wood.
+        let Some(rule)=self.rule(nature) else{return Some((GOOD_WOOD,1))};
+        let good=match rule.class{
+            8=>GOOD_WOOD,9=>GOOD_FOOD,13=>GOOD_STONE,
+            _=>return None,
+        };
+        Some((good,rule.amount.clamp(1,100)))
+    }
+    fn start_delivery(&mut self,unit:u32,good:usize,amount:i32){
         let from=self.entity(unit).map(|o|(o.x,o.y));
         let Some(from)=from else{return};
         let Some(storage)=self.nearest_storage(from) else{
-            self.goods[GOOD_WOOD]+=amount;return;
+            self.goods[good]=self.goods[good].saturating_add(amount);return;
         };
         let Some(to)=self.entity(storage).map(|o|(o.x,o.y)) else{return};
         if let Ok(path)=self.nearest_adjacent(unit,to) {
             self.entity_mut(unit).unwrap().task=Task::Walking{
-                steps:path,after:After::Deliver(storage,GOOD_WOOD,amount)
+                steps:path,after:After::Deliver(storage,good,amount)
             };
         } else {
-            self.goods[GOOD_WOOD]+=amount;
+            self.goods[good]=self.goods[good].saturating_add(amount);
         }
     }
     /// Deterministic fixed-time simulation. Path speed is temporarily
@@ -299,10 +315,12 @@ impl Simulation {
                     if time<59{
                         self.objects[i].task=Task::Gathering{tree,time:time+1}
                     } else {
+                        let (good,amount)=self.harvest_yield(tree)
+                            .unwrap_or((GOOD_WOOD,1));
                         removed.insert(tree);
-                        self.objects[i].carrying=1;
+                        self.objects[i].carrying=amount;
                         self.objects[i].task=Task::Idle;
-                        self.start_delivery(id,1);
+                        self.start_delivery(id,good,amount);
                     }
                 }
                 Task::Delivering{storage,good,amount}=>{
