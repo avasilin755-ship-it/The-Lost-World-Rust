@@ -5,7 +5,9 @@
  //!
  //! Supports a first data track (MODE1/2352 or MODE2/2352 XA Form 1).
  //! For mixed-mode CDs, subsequent CD Audio tracks are excluded.
- //! Rejects XA Form 2 sectors rather than silently truncating their data.
+ //! Uses the ISO-9660 Primary Volume Descriptor to determine the true number
+ //! of data sectors, excluding CD Audio pregaps and XA Form 2 lead-out sectors.
+ //! Rejects XA Form 2 inside the declared ISO filesystem instead of truncating.
 
 use std::env;
 use std::error::Error;
@@ -134,7 +136,27 @@ fn user_data<'a>(sector: &'a [u8; RAW_SECTOR], mode: u8) -> Result<&'a [u8], Str
     Ok(&sector[offset..offset + USER_SECTOR])
 }
 
-fn verify_iso9660(input: &mut File, start: u64, mode: u8) -> Result<(), Box<dyn Error>> {
+/// Return the volume length in 2048-byte logical sectors from the ISO-9660 PVD.
+fn volume_sectors_from_pvd(pvd: &[u8]) -> Result<u64, String> {
+    if pvd.len() != USER_SECTOR || pvd[0] != 1 || &pvd[1..6] != b"CD001" || pvd[6] != 1 {
+        return Err("ISO-9660 primary volume descriptor not found".into());
+    }
+    // The volume space size is encoded twice, once little-endian and once big-endian.
+    let le = u32::from_le_bytes(pvd[80..84].try_into().unwrap());
+    let be = u32::from_be_bytes(pvd[84..88].try_into().unwrap());
+    if le != be || le < 17 {
+        return Err("invalid ISO-9660 volume size".into());
+    }
+    // These original game discs use standard 2048-byte logical blocks.
+    let block_le = u16::from_le_bytes(pvd[128..130].try_into().unwrap());
+    let block_be = u16::from_be_bytes(pvd[130..132].try_into().unwrap());
+    if block_le != USER_SECTOR as u16 || block_be != USER_SECTOR as u16 {
+        return Err("unsupported ISO-9660 logical block size".into());
+    }
+    Ok(u64::from(le))
+}
+
+fn verify_iso9660(input: &mut File, start: u64, mode: u8) -> Result<u64, Box<dyn Error>> {
     let lba16 = start
         .checked_add(16)
         .and_then(|n| n.checked_mul(RAW_SECTOR as u64))
@@ -143,10 +165,7 @@ fn verify_iso9660(input: &mut File, start: u64, mode: u8) -> Result<(), Box<dyn 
     let mut sector = [0u8; RAW_SECTOR];
     input.read_exact(&mut sector)?;
     let data = user_data(&sector, mode)?;
-    if data[0] != 1 || &data[1..6] != b"CD001" || data[6] != 1 {
-        return Err("ISO-9660 primary volume descriptor not found at logical sector 16".into());
-    }
-    Ok(())
+    Ok(volume_sectors_from_pvd(data)?)
 }
 
 fn convert(cue_path: &Path, dest: &Path) -> Result<(), Box<dyn Error>> {
@@ -160,13 +179,26 @@ fn convert(cue_path: &Path, dest: &Path) -> Result<(), Box<dyn Error>> {
     if size % RAW_SECTOR as u64 != 0 {
         return Err("raw image size is not a multiple of 2352 bytes".into());
     }
-    let (mode, start, end) = data_track_range(&tracks, size / RAW_SECTOR as u64)?;
+    let (mode, start, cue_end) = data_track_range(&tracks, size / RAW_SECTOR as u64)?;
 
-    // Verify ISO volume descriptor before creating a large output file.
-    verify_iso9660(&mut source, start, mode)?;
+    // CD Audio pregaps (often 150 sectors) and trailing XA Form 2 sectors
+    // can appear in the raw track. Use the ISO filesystem's own declared
+    // length instead of blindly copying through the next track index.
+    let sector_count = verify_iso9660(&mut source, start, mode)?;
+    if sector_count > cue_end - start {
+        return Err(format!(
+            "ISO-9660 declares {sector_count} sectors but the CUE track contains only {}",
+            cue_end - start
+        ).into());
+    }
+    if sector_count < cue_end - start {
+        println!(
+            "Skipping {} trailing raw sectors outside the ISO-9660 volume",
+            cue_end - start - sector_count
+        );
+    }
     source.seek(SeekFrom::Start(start * RAW_SECTOR as u64))?;
 
-    let sector_count = end - start;
     let expected_len = sector_count * USER_SECTOR as u64;
     println!("Source: {}", image_path.display());
     println!("Mode: {mode}, data sectors: {sector_count}");
@@ -231,6 +263,23 @@ mod tests {
             b"FILE \"Mission.img\" BINARY\n TRACK 1 MODE2/2352\n INDEX 1 00:00:00\n"
         ).unwrap();
         assert_eq!(data_track_range(&tracks, 65993).unwrap(), (2, 0, 65993));
+    }
+
+    #[test]
+    fn volume_size_is_read_from_iso9660_descriptor() {
+        let mut pvd = vec![0u8; USER_SECTOR];
+        pvd[0] = 1;
+        pvd[1..6].copy_from_slice(b"CD001");
+        pvd[6] = 1;
+        // A filesystem shorter than the data track is valid: the remainder
+        // can be a CD Audio pregap or Mode 2 Form 2 lead-out.
+        pvd[80..84].copy_from_slice(&65991u32.to_le_bytes());
+        pvd[84..88].copy_from_slice(&65991u32.to_be_bytes());
+        pvd[128..130].copy_from_slice(&(USER_SECTOR as u16).to_le_bytes());
+        pvd[130..132].copy_from_slice(&(USER_SECTOR as u16).to_be_bytes());
+        assert_eq!(volume_sectors_from_pvd(&pvd).unwrap(), 65991);
+        pvd[84..88].copy_from_slice(&65993u32.to_be_bytes());
+        assert!(volume_sectors_from_pvd(&pvd).is_err());
     }
 
     #[test]
