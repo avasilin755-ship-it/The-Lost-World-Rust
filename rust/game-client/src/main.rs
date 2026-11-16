@@ -605,7 +605,12 @@ impl Game{
                     let oid=rule_id(self.simulation.human_race,ty);
                     match self.simulation.build(unit,oid,target){
                         Ok(id)=>{
+                            // Exit placement mode after a confirmed successful
+                            // build; previously it stayed active with a red
+                            // ghost because the assigned builder became busy.
                             self.selected.object=Some(id);
+                            self.selected.build=None;
+                            self.ui.page=HudPage::Selection;
                             self.minimap_ground=minimap_ground_texture(
                                 &self.simulation.terrain,&self.ground,self.stored
                             );
