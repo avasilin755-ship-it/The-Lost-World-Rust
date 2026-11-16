@@ -459,6 +459,7 @@ impl Game{
                 Task::Walking{..} if obj.carrying>0=>4,
                 Task::Gathering{..}|Task::Constructing{..}=>2,
                 Task::Holding{..}|Task::Delivering{..}=>4,
+                Task::Fetching{..}=>0,
                 Task::Idle if obj.carrying==0
                     && unit_idle_phase(obj.id,self.simulation.tick)<20
                     && self.sprites.has_slot(
@@ -909,6 +910,7 @@ impl Game{
                     Task::Gathering{time,..}=>(2,SpriteMotion::Loop(*time as u64)),
                     Task::Constructing{..}=>(2,SpriteMotion::Loop(self.simulation.tick)),
                     Task::Delivering{..}|Task::Holding{..}=>(4,SpriteMotion::Still),
+                    Task::Fetching{..}=>(0,SpriteMotion::Still),
                     Task::Idle=>{
                         if obj.carrying==0
                             && unit_idle_phase(obj.id,self.simulation.tick)<20
