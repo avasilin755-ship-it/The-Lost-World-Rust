@@ -11,3 +11,5 @@ pub mod mission;
 pub mod rules;
 pub mod terrain;
 pub mod sim;
+
+pub mod scheduler;
