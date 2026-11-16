@@ -674,13 +674,78 @@ mod tests{
         sim.order_gather(1,2).unwrap();
         for _ in 0..70{sim.step()}
         assert!(sim.entity(2).is_none());
+        // Resources remain with the worker until a real storage exists.
+        assert_eq!(sim.goods[1],0);
+        assert_eq!(sim.entity(1).unwrap().carrying,1);
+        assert!(matches!(sim.entity(1).unwrap().task,Task::Holding{..}));
+        let storage=sim.next_id;
+        sim.next_id+=1;
+        sim.objects.push(Entity{
+            id:storage,kind:1,group:2,object_type:40,owner:2,
+            x:9,y:10,hp:100,complete:true,construction:100,
+            task:Task::Idle,carrying:0
+        });
+        for _ in 0..180{sim.step()}
         assert_eq!(sim.goods[1],1);
+        assert_eq!(sim.entity(1).unwrap().carrying,0);
         let bytes=sim.save_snapshot();
         let mut loaded=setup();
         loaded.load_snapshot(&bytes).unwrap();
         assert_eq!(loaded.goods[1],1);
         assert_eq!(loaded.tick,sim.tick);
         assert_eq!(loaded.objects.len(),sim.objects.len());
+    }
+    fn house_rule(ty:i32)->ObjectRule{
+        let mut cost=[0;9];cost[GOOD_WOOD]=3;cost[GOOD_STONE]=2;
+        ObjectRule{
+            id:rule_id(2,ty),group:2,kind:1,object_type:ty,
+            name:"House".into(),size_x:2,size_y:2,door_dx:0,door_dy:0,
+            hp:200,radius:0,residents:0,flags:0,class:0,
+            step_ticks:[0;4],money:0,operator:0,invention:0,made_at:0,
+            cost,product:0,amount:0,weapon:0
+        }
+    }
+    #[test]
+    fn construction_reserves_all_cells_and_debits_only_once(){
+        let mut sim=setup();
+        sim.rules.insert(rule_id(2,37),house_rule(37));
+        sim.goods[GOOD_WOOD]=3;sim.goods[GOOD_STONE]=2;
+        let site=sim.build(1,rule_id(2,37),(25,25)).unwrap();
+        assert_eq!(sim.goods[GOOD_WOOD],0);
+        assert_eq!(sim.goods[GOOD_STONE],0);
+        assert_eq!(sim.can_build(1,rule_id(2,37),(30,30)),Err(GameError::Busy));
+        assert!(!sim.entity(site).unwrap().complete);
+        let snap=sim.save_snapshot();
+        let mut restored=setup();
+        restored.rules=sim.rules.clone();
+        restored.load_snapshot(&snap).unwrap();
+        assert_eq!(restored.entity(1).unwrap().task,sim.entity(1).unwrap().task);
+        for _ in 0..400{restored.step()}
+        assert!(restored.entity(site).unwrap().complete);
+        assert_eq!(restored.entity(site).unwrap().construction,100);
+        assert_eq!(restored.can_build(1,rule_id(2,37),(25,25)),Err(GameError::Occupied));
+        assert_eq!(restored.can_build(1,rule_id(2,37),(30,30)),Err(GameError::NotEnoughGoods));
+    }
+    #[test]
+    fn duplicate_town_halls_are_blocked_until_settlements_are_supported(){
+        let mut sim=setup();
+        let mut hall=house_rule(40);
+        hall.cost=[0;9];
+        sim.rules.insert(rule_id(2,40),hall);
+        sim.build(1,rule_id(2,40),(25,25)).unwrap();
+        for _ in 0..400{sim.step()}
+        assert_eq!(sim.can_build(1,rule_id(2,40),(28,28)),Err(GameError::TownHallExists));
+    }
+    #[test]
+    fn snapshot_preserves_active_gather_task(){
+        let mut sim=setup();
+        sim.order_gather(1,2).unwrap();
+        for _ in 0..12{sim.step()}
+        let state=sim.entity(1).unwrap().task.clone();
+        let bytes=sim.save_snapshot();
+        let mut loaded=setup();
+        loaded.load_snapshot(&bytes).unwrap();
+        assert_eq!(loaded.entity(1).unwrap().task,state);
     }
     #[test]
     fn snapshot_rejects_truncation(){
