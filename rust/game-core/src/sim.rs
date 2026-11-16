@@ -452,11 +452,12 @@ impl Simulation {
             .map(|o|o.id).collect()
     }
 
-    /// Minimal local binary snapshots of entity positions, resources and ticks.
-    /// Orders are reset on load; no original savegame format is claimed.
+    /// TLWSNAP2 preserves pending jobs, carried goods, construction progress,
+    /// and pause state. TLWSNAP1 remains readable for old local saves.
     pub fn save_snapshot(&self)->Vec<u8>{
-        let mut b=b"TLWSNAP1".to_vec();
+        let mut b=b"TLWSNAP2".to_vec();
         b.extend_from_slice(&self.tick.to_le_bytes());
+        b.push(u8::from(self.paused));
         b.extend_from_slice(&self.gold.to_le_bytes());
         for good in self.goods {b.extend_from_slice(&good.to_le_bytes())}
         b.extend_from_slice(&self.next_id.to_le_bytes());
@@ -468,11 +469,65 @@ impl Simulation {
             }
             b.push(u8::from(o.complete));
             b.extend_from_slice(&o.construction.to_le_bytes());
+            b.extend_from_slice(&o.carrying.to_le_bytes());
+            match &o.task{
+                Task::Idle=>b.push(0),
+                Task::Walking{steps,after}=>{
+                    b.push(1);
+                    b.extend_from_slice(&(steps.len() as u32).to_le_bytes());
+                    for &(x,y) in steps{
+                        b.extend_from_slice(&x.to_le_bytes());
+                        b.extend_from_slice(&y.to_le_bytes());
+                    }
+                    match after{
+                        After::Idle=>b.push(0),
+                        After::Gather(id)=>{
+                            b.push(1);b.extend_from_slice(&id.to_le_bytes());
+                        }
+                        After::Deliver(id,good,amount)=>{
+                            b.push(2);b.extend_from_slice(&id.to_le_bytes());
+                            b.extend_from_slice(&(*good as u32).to_le_bytes());
+                            b.extend_from_slice(&amount.to_le_bytes());
+                        }
+                        After::Construct(id)=>{
+                            b.push(3);b.extend_from_slice(&id.to_le_bytes());
+                        }
+                        After::Hold(good,amount)=>{
+                            b.push(4);
+                            b.extend_from_slice(&(*good as u32).to_le_bytes());
+                            b.extend_from_slice(&amount.to_le_bytes());
+                        }
+                    }
+                }
+                Task::Gathering{tree,time}=>{
+                    b.push(2);
+                    b.extend_from_slice(&tree.to_le_bytes());
+                    b.extend_from_slice(&time.to_le_bytes());
+                }
+                Task::Delivering{storage,good,amount}=>{
+                    b.push(3);
+                    b.extend_from_slice(&storage.to_le_bytes());
+                    b.extend_from_slice(&(*good as u32).to_le_bytes());
+                    b.extend_from_slice(&amount.to_le_bytes());
+                }
+                Task::Constructing{site}=>{
+                    b.push(4);b.extend_from_slice(&site.to_le_bytes());
+                }
+                Task::Holding{good,amount}=>{
+                    b.push(5);
+                    b.extend_from_slice(&(*good as u32).to_le_bytes());
+                    b.extend_from_slice(&amount.to_le_bytes());
+                }
+            }
         }
         b
     }
     pub fn load_snapshot(&mut self,b:&[u8])->Result<(),GameError>{
-        if b.len()<8+8+4+9*4+4+4||&b[..8]!=b"TLWSNAP1"{
+        if b.len()<8+8+4+9*4+4+4{
+            return Err(GameError::Invalid("invalid snapshot header"))
+        }
+        let legacy=&b[..8]==b"TLWSNAP1";
+        if !legacy&&&b[..8]!=b"TLWSNAP2"{
             return Err(GameError::Invalid("invalid snapshot header"))
         }
         let mut pos=8usize;
@@ -482,6 +537,7 @@ impl Simulation {
             pos=end;Ok(value)
         };
         let tick=u64::from_le_bytes(take(8)?.try_into().unwrap());
+        let paused=if legacy {false}else{take(1)?[0]!=0};
         let gold=i32::from_le_bytes(take(4)?.try_into().unwrap());
         let mut goods=[0i32;9];
         for g in &mut goods{*g=i32::from_le_bytes(take(4)?.try_into().unwrap())}
@@ -499,20 +555,87 @@ impl Simulation {
             let construction=u16::from_le_bytes(take(2)?.try_into().unwrap());
             if construction>100{return Err(GameError::Invalid("invalid construction"))}
             if values[4]<0||values[5]<0||values[4]>=self.terrain.size as i32
-                || values[5]>=self.terrain.size as i32{
+                ||values[5]>=self.terrain.size as i32{
                 return Err(GameError::Invalid("entity out of bounds"))
             }
+            let carrying=if legacy{0}else{
+                i32::from_le_bytes(take(4)?.try_into().unwrap())
+            };
+            if carrying<0{return Err(GameError::Invalid("negative carried goods"))}
+            let task=if legacy{Task::Idle}else{
+                let tag=take(1)?[0];
+                match tag{
+                    0=>Task::Idle,
+                    1=>{
+                        let n=u32::from_le_bytes(take(4)?.try_into().unwrap()) as usize;
+                        if n>30_000{return Err(GameError::Invalid("snapshot path too long"))}
+                        let mut steps=Vec::with_capacity(n);
+                        for _ in 0..n{
+                            let x=i32::from_le_bytes(take(4)?.try_into().unwrap());
+                            let y=i32::from_le_bytes(take(4)?.try_into().unwrap());
+                            if x<0||y<0||x>=self.terrain.size as i32
+                                ||y>=self.terrain.size as i32{
+                                return Err(GameError::Invalid("path step out of bounds"))
+                            }
+                            steps.push((x,y));
+                        }
+                        let after=match take(1)?[0]{
+                            0=>After::Idle,
+                            1=>After::Gather(u32::from_le_bytes(take(4)?.try_into().unwrap())),
+                            2=>{
+                                let id=u32::from_le_bytes(take(4)?.try_into().unwrap());
+                                let good=u32::from_le_bytes(take(4)?.try_into().unwrap()) as usize;
+                                let amount=i32::from_le_bytes(take(4)?.try_into().unwrap());
+                                if good>=9||amount<0{return Err(GameError::Invalid("invalid cargo"))}
+                                After::Deliver(id,good,amount)
+                            }
+                            3=>After::Construct(u32::from_le_bytes(take(4)?.try_into().unwrap())),
+                            4=>{
+                                let good=u32::from_le_bytes(take(4)?.try_into().unwrap()) as usize;
+                                let amount=i32::from_le_bytes(take(4)?.try_into().unwrap());
+                                if good>=9||amount<0{return Err(GameError::Invalid("invalid cargo"))}
+                                After::Hold(good,amount)
+                            }
+                            _=>return Err(GameError::Invalid("unknown after-task tag"))
+                        };
+                        Task::Walking{steps,after}
+                    }
+                    2=>{
+                        let tree=u32::from_le_bytes(take(4)?.try_into().unwrap());
+                        let time=u16::from_le_bytes(take(2)?.try_into().unwrap());
+                        if time>=60{return Err(GameError::Invalid("invalid harvest progress"))}
+                        Task::Gathering{tree,time}
+                    }
+                    3=>{
+                        let storage=u32::from_le_bytes(take(4)?.try_into().unwrap());
+                        let good=u32::from_le_bytes(take(4)?.try_into().unwrap()) as usize;
+                        let amount=i32::from_le_bytes(take(4)?.try_into().unwrap());
+                        if good>=9||amount<0{return Err(GameError::Invalid("invalid cargo"))}
+                        Task::Delivering{storage,good,amount}
+                    }
+                    4=>Task::Constructing{
+                        site:u32::from_le_bytes(take(4)?.try_into().unwrap())
+                    },
+                    5=>{
+                        let good=u32::from_le_bytes(take(4)?.try_into().unwrap()) as usize;
+                        let amount=i32::from_le_bytes(take(4)?.try_into().unwrap());
+                        if good>=9||amount<0{return Err(GameError::Invalid("invalid cargo"))}
+                        Task::Holding{good,amount}
+                    }
+                    _=>return Err(GameError::Invalid("unknown task tag"))
+                }
+            };
             objects.push(Entity{
                 id,kind:values[0],group:values[1],object_type:values[2],
                 owner:values[3],x:values[4],y:values[5],hp:values[6],
-                complete,construction,task:Task::Idle,carrying:0
+                complete,construction,task,carrying
             });
         }
         if pos!=b.len()||next_id<=ids.iter().copied().max().unwrap_or(0){
             return Err(GameError::Invalid("snapshot trailing data or invalid next id"))
         }
         self.tick=tick;self.gold=gold;self.goods=goods;self.next_id=next_id;
-        self.objects=objects;
+        self.objects=objects;self.paused=paused;
         Ok(())
     }
 }
