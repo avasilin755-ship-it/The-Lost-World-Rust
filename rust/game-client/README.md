@@ -254,3 +254,26 @@ See [TEST_CHECKLIST.md](TEST_CHECKLIST.md) for precise Windows acceptance tests.
 This update has automated compile/unit tests, but real original artwork,
 in-game rendering, Windows responsiveness and full scenario behavior
 require the player's next screenshot/video. It is not a complete port.
+
+
+## Second video review (2026-11-16, 78 seconds)
+
+The second recording confirmed that the native race panel, Russian UI,
+a wrong-worker warning, moving units and house construction display on
+Windows. It showed approximately 51 FPS at 1.85x zoom in a 660-object
+scene. That measurement alone is insufficient to attribute a specific
+CPU/GPU bottleneck.
+
+The subsequent update ports the minimap coordinate system (original
+transposed x/y mapping), 152x152 image and RGB averages from original
+OS files, relief shading, 3x3 blur, toroidal camera centring, original
+race-coloured markers and viewport diamond. It also returns from
+building placement to the selected site's page after a successful
+construction order.
+
+Press F3 to expose averaged per-frame CPU timings for game updates,
+world rendering and the HUD. These separate game simulation cost from
+terrain and interface drawing. The next video should keep the
+diagnostic overlay visible throughout the camera and zoom checks.
+
+See [the playtest checklist](TEST_CHECKLIST.md).
