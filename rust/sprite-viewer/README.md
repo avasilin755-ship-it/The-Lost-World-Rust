@@ -1,3 +1,29 @@
+# The Lost World — Rust prototype tools
+
+## Isometric scene test (NEW)
+
+Launch a small experimental terrain with original GD building, unit,
+ship and neutral-nature sprites. The terrain shading and object placements
+are an illustrative testbed, **not yet a recreation of the original maps**.
+
+Run these commands in PowerShell from the repository root:
+
+```powershell
+$root = "$HOME\Games\DieVolker_Original"
+$baseGD = Get-ChildItem "$root\GameAssets\Base" -Recurse -File -Filter "dv.gd" | Select-Object -First 1 -ExpandProperty FullName
+$addonGD = "$root\GameAssets\MissionPack\ADDON.GD"
+cargo run --manifest-path rust/sprite-viewer/Cargo.toml -- --scene "$baseGD" "$addonGD"
+```
+
+Controls: WASD/arrow keys pan; mouse wheel zooms; right mouse drags;
+left click selects a tile; keys 1 tree, 2 house, 3 person,
+4 ship (water only), 5 school, Delete removes objects from a selected tile;
+Escape exits. Land/water placement restrictions apply.
+Original sprite layers, render anchors and painter ordering are early approximations.
+There is no pathfinding, production, combat, save system, AI or actual terrain data yet.
+
+---
+
 # The Lost World — Rust Sprite Viewer and GD Catalog
 
 A local development tool, built with **Rust + Macroquad 0.4.16**.
