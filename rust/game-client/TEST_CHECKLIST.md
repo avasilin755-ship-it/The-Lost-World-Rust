@@ -4,6 +4,52 @@ Review source: user's 43-second video, 16 November 2026.
 This document lists what to test. It does not claim that local
 game assets, live gameplay or an Android device have been tested.
 
+## Second recorded playtest — 2026-11-16 (78 seconds)
+
+Source: 20261116-1849-17.8162989.mp4 (1918x1014, 30 fps capture).
+
+**Observed as working:** original race-specific side-panel art; Russian/English
+switching (00:03/00:09/00:12); native-unit selection and movement (00:15-00:36);
+profession-restricted right-click messages (00:18); building placement and
+construction stage visuals (00:42-00:58); camera panning and terrain/trees/animals
+(01:03-01:17); F5 *save* notification in English (00:09).
+
+**Observed defects or deviations:** original minimap's transposed,
+camera-centred orientation was not implemented; colours were a simple
+green/blue classification instead of sampled OS textures; viewport marker
+was a circle rather than a diamond; builder remained in active placement
+mode after successful construction; diagnostic overlay showed roughly
+51 FPS at 1.85x zoom on a scene with 660 objects (00:03).
+
+**Corrections since this recording:** original 152x152 minimap palette,
+relief shade and Gaussian blur, wrapped image scroll around the camera,
+transposed click mapping, native race-coloured object markers and viewport
+diamond; exit placement mode after a successful site creation; F3 CPU
+times for simulation/update, world renderer and HUD.
+
+**Not proved by this recording:** F9 restoration after a built foundation,
+four-way wrapped map seam, all minimap toggles and drag behaviours, combat,
+full resource logistics, correctness of the real Gold campaign, Android,
+long-duration memory/performance. The F5 notification proves that the
+save action was accepted, not that its contents can be restored perfectly.
+
+### Targeted checks for the next recording
+
+- [ ] Open the minimap, click near its centre: world camera should
+      remain in place. Click near its top edge: centre moves to the
+      corresponding original map X, not Y. Repeatedly pan; map scrolls
+      under the **centred white diamond**, wrapping seamlessly.
+- [ ] Observe snow/grass/forest/lake colours on the minimap. Snow should
+      be pale and water blue, with no dominant featureless green image.
+- [ ] Select a builder, place a house, then check the sidebar switches
+      to selected-site information and the red building outline vanishes.
+- [ ] Keep F3 on while zooming in/out and navigating a forest:
+      report FPS and **CPU update/world/HUD ms** at each zoom level.
+- [ ] Build, save F5, move camera and load F9. Confirm the building
+      stage, resources, position, and levelled ground are restored.
+- [ ] At 1x, inspect trees, rock, berries and snow/water transitions
+      for overlays, flicker, clipping and mismatched animations.
+
 ## Pull and launch
 
 ~~~powershell
