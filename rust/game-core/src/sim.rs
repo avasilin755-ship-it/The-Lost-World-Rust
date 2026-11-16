@@ -82,7 +82,7 @@ pub struct Simulation {
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub enum GameError{
     Invalid(&'static str),NoPath,MissingObject,NotOwned,NotEnoughGoods,Occupied,NotLand,
-    Busy,TownHallExists,TooManyEntities
+    Busy,TownHallExists,TooManyEntities,WrongWorker
 }
 impl std::fmt::Display for GameError{
     fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result{write!(f,"{self:?}")}
@@ -294,6 +294,18 @@ impl Simulation {
         if self.harvest_yield(tree).is_none(){
             return Err(GameError::Invalid("this nature object is not a gatherable resource"))
         }
+        // Original tasks are role-specific. The previous prototype allowed
+        // a builder (type 11) to harvest trees and crops, which the video
+        // revealed as a gameplay bug.
+        let nature_class=self.rule(target).map_or(8,|r|r.class);
+        let worker_type=self.entity(unit).ok_or(GameError::MissingObject)?.object_type;
+        let allowed=match nature_class{
+            8=>worker_type==19,         // woodcutter -> tree
+            9|10..=12=>worker_type==9, // porter -> bushes and crops
+            13=>worker_type==27,       // stonemason -> stone
+            _=>false,
+        };
+        if !allowed{return Err(GameError::WrongWorker)}
         if self.entity(unit).is_some_and(|o|o.carrying>0){
             return Err(GameError::Busy)
         }
