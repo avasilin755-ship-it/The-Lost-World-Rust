@@ -443,7 +443,13 @@ impl Game{
     fn update(&mut self){
         let dt=get_frame_time().min(0.10);
         if is_key_pressed(KeyCode::Escape){
-            self.selected.build=None;
+            if self.selected.build.is_some(){
+                self.selected.build=None;
+            }else{
+                self.selected.unit=None;
+                self.selected.units.clear();
+                self.selected.object=None;
+            }
             self.selected.error=None;
         }
         if is_key_pressed(KeyCode::P){self.simulation.paused=!self.simulation.paused}
@@ -475,6 +481,8 @@ impl Game{
         if is_key_pressed(KeyCode::Key2){self.selected.build=Some(40)}
         if is_key_pressed(KeyCode::Key3){self.selected.build=Some(41)}
         if is_key_pressed(KeyCode::Key0){self.selected.build=None}
+        if is_key_pressed(KeyCode::PageUp){self.zoom=0.5}
+        if is_key_pressed(KeyCode::PageDown){self.zoom=1.0}
         let pan=PAN_SPEED*dt/self.zoom;
         if is_key_down(KeyCode::W)||is_key_down(KeyCode::Up){self.camera.y-=pan}
         if is_key_down(KeyCode::S)||is_key_down(KeyCode::Down){self.camera.y+=pan}
@@ -492,10 +500,40 @@ impl Game{
             self.camera-=mouse_delta_position()/self.zoom;
         }
         if is_mouse_button_pressed(MouseButton::Left){
-            self.handle_mouse_click(mouse,true)
+            self.left_press=Some(mouse);
+        }
+        if is_mouse_button_released(MouseButton::Left){
+            let start=self.left_press.take().unwrap_or(mouse);
+            let delta=(mouse-start).abs();
+            if delta.x>4.0||delta.y>4.0{
+                if start.x<screen_width()-SIDE && start.y>=TOP
+                    && self.selected.build.is_none(){
+                    self.select_box(start,mouse);
+                }else{
+                    self.handle_mouse_click(start,true);
+                }
+            }else{
+                self.handle_mouse_click(start,true);
+            }
         }
         if is_mouse_button_pressed(MouseButton::Right){
-            self.handle_mouse_click(mouse,false)
+            self.right_press=Some(mouse);
+        }
+        if is_mouse_button_released(MouseButton::Right){
+            let start=self.right_press.take().unwrap_or(mouse);
+            let delta=(mouse-start).abs();
+            if delta.x<10.0 && delta.y<10.0{
+                self.handle_mouse_click(start,false);
+            }
+        }
+        // Edge scrolling, as in the original RTS. The side panel is excluded.
+        if mouse.x<screen_width()-SIDE && mouse.y>=TOP && mouse.y<screen_height()-FOOT
+            && !is_mouse_button_down(MouseButton::Left){
+            let edge=15.0;
+            if mouse.x<edge{self.camera.x-=pan}
+            else if mouse.x>screen_width()-SIDE-edge{self.camera.x+=pan}
+            if mouse.y<TOP+edge{self.camera.y-=pan}
+            else if mouse.y>screen_height()-FOOT-edge{self.camera.y+=pan}
         }
         self.accumulator+=dt;
         for _ in 0..MAX_TICKS_PER_FRAME{
@@ -558,7 +596,8 @@ impl Game{
             let obj=&self.simulation.objects[index];
             let position=self.screen(obj.x as f32,obj.y as f32);
             let oid=rule_id(obj.group,obj.object_type);
-            let chosen=self.selected.object==Some(obj.id);
+            let chosen=self.selected.object==Some(obj.id)
+                ||self.selected.units.contains(&obj.id);
             if chosen{
                 draw_circle_lines(position.x,position.y,
                     21.0*self.zoom,2.0,YELLOW);
@@ -685,6 +724,18 @@ impl Game{
         let n=self.simulation.terrain.size as f32;
         Some((((p.x-x)/w*n) as i32,((p.y-y)/h*n) as i32))
     }
+    fn draw_selection_marquee(&self){
+        if self.selected.build.is_some(){return}
+        let Some(start)=self.left_press else{return};
+        if start.x>=screen_width()-SIDE||start.y<TOP{return}
+        if !is_mouse_button_down(MouseButton::Left){return}
+        let (x,y)=mouse_position();
+        let end=vec2(x.min(screen_width()-SIDE),y.min(screen_height()-FOOT));
+        if (end-start).length()<4.0{return}
+        let x=start.x.min(end.x);let y=start.y.min(end.y);
+        let w=(end.x-start.x).abs();let h=(end.y-start.y).abs();
+        draw_rectangle_lines(x,y,w,h,1.5,GOLD);
+    }
     fn draw_hud(&self){
         let sw=screen_width();let sh=screen_height();
         let side_x=sw-SIDE;
@@ -729,7 +780,9 @@ impl Game{
             }
         }
         draw_text("0 - CANCEL BUILD",side_x+17.0,TOP+323.0,17.0,LIGHTGRAY);
-        draw_text("SELECTED",side_x+16.0,TOP+372.0,22.0,GOLD);
+        draw_text(&format!("SELECTED ({})",
+            self.selected.units.len().max(usize::from(self.selected.object.is_some()))),
+            side_x+16.0,TOP+372.0,22.0,GOLD);
         if let Some(id)=self.selected.object{
             if let Some(o)=self.simulation.entity(id){
                 let name=self.simulation.rule(o)
@@ -764,11 +817,11 @@ impl Game{
         }
         draw_rectangle(0.0,sh-FOOT,sw,FOOT,Color::from_rgba(17,25,22,255));
         draw_text(
-            "LMB SELECT / PLACE    RMB ORDER / HARVEST / RESUME BUILD    WASD PAN    WHEEL ZOOM",
+            "LMB SELECT / DRAG GROUP    SHIFT ADD / CTRL TOGGLE    RMB ORDER    WASD PAN",
             14.0,sh-30.0,19.0,LIGHTGRAY
         );
         draw_text(
-            "P PAUSE    X DROP UNDELIVERED CARGO    F4 MAP    F5 SAVE    F9 LOAD",
+            "WHEEL ZOOM    PGUP/PGDN ZOOM    P PAUSE    X DROP CARGO    F4 MAP    F5/F9 SAVE/LOAD",
             14.0,sh-10.0,16.0,GRAY
         );
         if let Some((message,until))=&self.toast{
@@ -785,6 +838,7 @@ impl Game{
             self.update();
             clear_background(Color::from_rgba(26,42,37,255));
             self.draw_world();
+            self.draw_selection_marquee();
             self.draw_hud();
             next_frame().await;
         }
