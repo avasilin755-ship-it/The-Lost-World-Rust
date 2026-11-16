@@ -4,3 +4,4 @@
 //! Asset format readers are the first portable foundation.
 
 pub mod gd;
+pub mod png;
