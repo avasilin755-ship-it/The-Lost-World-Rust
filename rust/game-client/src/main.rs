@@ -7,6 +7,8 @@
 
 mod resources;
 mod localization;
+mod classic_hud;
+mod classic_ui;
 
 use game_core::{
     mission::{GameMap,Mission,parse_dvm,parse_mdb},
@@ -17,11 +19,14 @@ use game_core::{
 use macroquad::prelude::*;
 use resources::{WorldArt,TerrainArt,SpriteMotion,project,unproject,world_to_screen};
 use localization::{Language,Key,tr};
+use classic_hud::{hud_width,hud_x,hud_scale,panel_point};
+use classic_ui::{ClassicUi,HudPage};
 use std::{collections::HashMap,env,fs,path::{Path,PathBuf}};
 
-const TOP:f32=91.0;
-const SIDE:f32=290.0;
-const FOOT:f32=55.0;
+// In the original 1024x768 game, the world occupies all the height.
+// Only the 192-pixel race panel reserves screen space on the right.
+const TOP:f32=0.0;
+const FOOT:f32=0.0;
 const PAN_SPEED:f32=500.0;
 const TICK_SECONDS:f32=0.10;
 const MAX_TICKS_PER_FRAME:usize=5;
@@ -199,6 +204,7 @@ struct Game {
     last_click:Option<(u32,f64)>,
     ui_font:Option<Font>,
     lang:Language,
+    ui:ClassicUi,
     last_positions:HashMap<u32,(i32,i32)>,
     tweens:HashMap<u32,SpriteTween>,
 }
@@ -267,6 +273,7 @@ impl Game{
             .filter(|o|o.kind==0||o.kind==2
                 &&simulation.rule(o).is_some_and(|r|r.class==7))
             .map(|o|(o.id,(o.x,o.y))).collect::<HashMap<_,_>>();
+        let ui=ClassicUi::new(data_dir,human);
         let ui_font=load_ui_font();
         let lang=if ui_font.is_some(){Language::Russian}
             else{Language::English};
@@ -275,12 +282,12 @@ impl Game{
             selected:Selection::default(),accumulator:0.0,
             minimap:true,stored:map.terrain.is_some(),save_file,toast:None,
             left_press:None,right_press:None,last_click:None,
-            ui_font,lang,last_positions,tweens:HashMap::new(),
+            ui_font,lang,ui,last_positions,tweens:HashMap::new(),
         })
     }
 
     fn center(&self)->Vec2{
-        vec2((screen_width()-SIDE)*0.5,screen_height()*0.52)
+        vec2((screen_width()-hud_width())*0.5,screen_height()*0.5)
     }
     fn screen(&self,x:f32,y:f32)->Vec2{
         world_to_screen(&self.simulation.terrain,x,y,self.camera,self.zoom,self.center())
@@ -517,23 +524,7 @@ impl Game{
             }
             return
         }
-        let side_x=screen_width()-SIDE;
-        if mouse.x>=side_x{
-            // Build panel rows are mouse-selectable as in the original.
-            if left && mouse.y>=TOP+170.0{
-                for (i,ty) in [37,40,41].iter().enumerate(){
-                    let y=TOP+170.0+i as f32*43.0;
-                    if mouse.y>=y&&mouse.y<=y+34.0{
-                        self.selected.build=Some(*ty);
-                        return
-                    }
-                }
-                if (TOP+314.0..=TOP+344.0).contains(&mouse.y){
-                    self.selected.build=None;
-                }
-            }
-            return
-        }
+        if classic_ui::click(self,mouse,left){return}
         if mouse.y<TOP||mouse.y>screen_height()-FOOT{return}
         let target=self.pick_cell(mouse);
         if left{
@@ -563,6 +554,9 @@ impl Game{
             }
             let hit=self.hit_sprite(mouse,false);
             self.select_one(hit);
+            if hit.is_some(){self.ui.page=HudPage::Selection;}
+        }else if self.selected.build.is_some(){
+            self.selected.build=None;
         }else{self.issue_order(mouse);}
     }
     fn issue_cell_order(&mut self,cell:(i32,i32)){
@@ -581,6 +575,42 @@ impl Game{
         }
     }
 
+    fn quick_save(&mut self){
+        let result=fs::create_dir_all("saves")
+            .and_then(|_|fs::write(&self.save_file,self.simulation.save_snapshot()));
+        match result{
+            Ok(())=>self.notify(if self.lang==Language::Russian{
+                "Игра сохранена (F9 — загрузить)"
+            }else{"Snapshot saved (F9 to restore)"}),
+            Err(e)=>self.notify(if self.lang==Language::Russian{
+                format!("Ошибка сохранения: {e}")
+            }else{format!("Save failed: {e}")}),
+        }
+    }
+    fn quick_load(&mut self){
+        let result=fs::read(&self.save_file)
+            .map_err(|e|e.to_string())
+            .and_then(|b|self.simulation.load_snapshot(&b).map_err(|e|e.to_string()));
+        match result{
+            Ok(())=>{
+                self.reset_sprite_movements();
+                self.notify(if self.lang==Language::Russian{
+                    "Сохранение загружено"
+                }else{"Snapshot restored"})
+            },
+            Err(e)=>self.notify(if self.lang==Language::Russian{
+                format!("Ошибка загрузки: {e}")
+            }else{format!("Load failed: {e}")}),
+        }
+    }
+    fn toggle_language(&mut self){
+        if self.ui_font.is_some()||self.lang==Language::Russian{
+            self.lang=self.lang.toggle();
+            self.notify(if self.lang==Language::Russian{
+                "Язык интерфейса: русский"
+            }else{"Interface language: English"});
+        }
+    }
     fn update(&mut self){
         let dt=get_frame_time().min(0.10);
         if is_key_pressed(KeyCode::Escape){
@@ -594,14 +624,7 @@ impl Game{
             self.selected.error=None;
         }
         if is_key_pressed(KeyCode::P){self.simulation.paused=!self.simulation.paused}
-        if is_key_pressed(KeyCode::F10){
-            if self.ui_font.is_some()||self.lang==Language::Russian{
-                self.lang=self.lang.toggle();
-                self.notify(if self.lang==Language::Russian{
-                    "Язык интерфейса: русский"
-                }else{"Interface language: English"});
-            }
-        }
+        if is_key_pressed(KeyCode::F10){self.toggle_language()}
         if is_key_pressed(KeyCode::X){
             if let Some(unit)=self.selected.unit{
                 match self.simulation.drop_cargo(unit){
@@ -618,34 +641,8 @@ impl Game{
             }
         }
         if is_key_pressed(KeyCode::F4){self.minimap=!self.minimap}
-        if is_key_pressed(KeyCode::F5){
-            let result=fs::create_dir_all("saves")
-                .and_then(|_|fs::write(&self.save_file,self.simulation.save_snapshot()));
-            match result{
-                Ok(())=>self.notify(if self.lang==Language::Russian{
-                    "Игра сохранена (F9 — загрузить)"
-                }else{"Snapshot saved (F9 to restore)"}),
-                Err(e)=>self.notify(if self.lang==Language::Russian{
-                    format!("Ошибка сохранения: {e}")
-                }else{format!("Save failed: {e}")})
-            }
-        }
-        if is_key_pressed(KeyCode::F9){
-            let result=fs::read(&self.save_file)
-                .map_err(|e|e.to_string())
-                .and_then(|b|self.simulation.load_snapshot(&b).map_err(|e|e.to_string()));
-            match result{
-                Ok(())=>{
-                    self.reset_sprite_movements();
-                    self.notify(if self.lang==Language::Russian{
-                        "Сохранение загружено"
-                    }else{"Snapshot restored"})
-                },
-                Err(e)=>self.notify(if self.lang==Language::Russian{
-                    format!("Ошибка загрузки: {e}")
-                }else{format!("Load failed: {e}")})
-            }
-        }
+        if is_key_pressed(KeyCode::F5){self.quick_save()}
+        if is_key_pressed(KeyCode::F9){self.quick_load()}
         if is_key_pressed(KeyCode::Key1){self.selected.build=Some(37)}
         if is_key_pressed(KeyCode::Key2){self.selected.build=Some(40)}
         if is_key_pressed(KeyCode::Key3){self.selected.build=Some(41)}
@@ -660,7 +657,7 @@ impl Game{
         let (mx,my)=mouse_position();
         let mouse=vec2(mx,my);
         let (_wx,wy)=mouse_wheel();
-        if wy!=0.0&&mx<screen_width()-SIDE{
+        if wy!=0.0&&mx<screen_width()-hud_width(){
             let before=(mouse-self.center())/self.zoom+self.camera;
             self.zoom=(self.zoom+wy.signum()*0.15).clamp(0.5,2.75);
             self.camera=before-(mouse-self.center())/self.zoom;
@@ -675,7 +672,7 @@ impl Game{
             let start=self.left_press.take().unwrap_or(mouse);
             let delta=(mouse-start).abs();
             if delta.x>4.0||delta.y>4.0{
-                if start.x<screen_width()-SIDE && start.y>=TOP
+                if start.x<screen_width()-hud_width() && start.y>=TOP
                     && self.selected.build.is_none(){
                     self.select_box(start,mouse);
                 }else{
@@ -696,11 +693,11 @@ impl Game{
             }
         }
         // Edge scrolling, as in the original RTS. The side panel is excluded.
-        if mouse.x<screen_width()-SIDE && mouse.y>=TOP && mouse.y<screen_height()-FOOT
+        if mouse.x<screen_width()-hud_width() && mouse.y>=TOP && mouse.y<screen_height()-FOOT
             && !is_mouse_button_down(MouseButton::Left){
             let edge=15.0;
             if mouse.x<edge{self.camera.x-=pan}
-            else if mouse.x>screen_width()-SIDE-edge{self.camera.x+=pan}
+            else if mouse.x>screen_width()-hud_width()-edge{self.camera.x+=pan}
             if mouse.y<TOP+edge{self.camera.y-=pan}
             else if mouse.y>screen_height()-FOOT-edge{self.camera.y+=pan}
         }
@@ -719,7 +716,7 @@ impl Game{
     fn draw_world(&mut self){
         let sw=screen_width();
         let sh=screen_height();
-        let width=sw-SIDE;
+        let width=sw-hud_width();
         let origin=self.center();
         // Derive a rectangle of world cells from the visible screen
         // region. This is far smaller than traversing a full 512x512 map.
@@ -877,7 +874,9 @@ impl Game{
             dest_size:Some(vec2(width,height)),..Default::default()
         });
         for obj in &self.simulation.objects{
-            if obj.kind==1||obj.kind==0{
+            if (obj.kind==1&&self.ui.show_buildings)
+                ||(obj.kind==0&&self.ui.show_units)
+                ||(obj.kind==2&&self.ui.show_resources){
                 let color=if obj.group==self.simulation.human_race{GOLD}else{RED};
                 draw_rectangle(x+obj.x as f32/n*width,
                     y+obj.y as f32/n*height,3.0,3.0,color)
@@ -889,10 +888,10 @@ impl Game{
             7.0,1.0,WHITE);
     }
     fn minimap_bounds(&self)->Option<(f32,f32,f32,f32)>{
-        let sh=screen_height();
-        if !self.minimap||sh<=710.0{return None}
-        let max=(sh-TOP-FOOT-508.0).clamp(90.0,170.0);
-        Some((screen_width()-SIDE+22.0,sh-FOOT-max-20.0,SIDE-44.0,max))
+        if !self.minimap{return None}
+        let p=panel_point(6.0,6.0);
+        let scale=hud_scale();
+        Some((p.x,p.y,152.0*scale,152.0*scale))
     }
     fn minimap_cell(&self,p:Vec2)->Option<(i32,i32)>{
         let (x,y,w,h)=self.minimap_bounds()?;
@@ -903,130 +902,17 @@ impl Game{
     fn draw_selection_marquee(&self){
         if self.selected.build.is_some(){return}
         let Some(start)=self.left_press else{return};
-        if start.x>=screen_width()-SIDE||start.y<TOP{return}
+        if start.x>=screen_width()-hud_width()||start.y<TOP{return}
         if !is_mouse_button_down(MouseButton::Left){return}
         let (x,y)=mouse_position();
-        let end=vec2(x.min(screen_width()-SIDE),y.min(screen_height()-FOOT));
+        let end=vec2(x.min(screen_width()-hud_width()),y.min(screen_height()-FOOT));
         if (end-start).length()<4.0{return}
         let x=start.x.min(end.x);let y=start.y.min(end.y);
         let w=(end.x-start.x).abs();let h=(end.y-start.y).abs();
         draw_rectangle_lines(x,y,w,h,1.5,GOLD);
     }
     fn draw_hud(&self){
-        let sw=screen_width();
-        let sh=screen_height();
-        let side_x=sw-SIDE;
-        let ru=self.lang==Language::Russian;
-        draw_rectangle(0.0,0.0,sw,TOP,Color::from_rgba(20,29,25,255));
-        self.draw_ui(tr(self.lang,Key::GameTitle),20.0,37.0,28.0,GOLD);
-        if side_x>850.0{
-            self.draw_ui(&format!("FPS: {} | GD: {}",
-                get_fps(),self.sprites.cache_size()),
-                side_x-235.0,36.0,16.0,LIGHTGRAY);
-        }
-        let status=format!(
-            "{}: {}   {}: {}   {}: {}   {}: {}   {}: {}   {}",
-            tr(self.lang,Key::Gold),self.simulation.gold,
-            tr(self.lang,Key::Wood),self.simulation.goods[1],
-            tr(self.lang,Key::Stone),self.simulation.goods[2],
-            tr(self.lang,Key::Food),self.simulation.goods[4],
-            tr(self.lang,Key::Tick),self.simulation.tick,
-            tr(self.lang,if self.simulation.paused{Key::Paused}else{Key::Running})
-        );
-        self.draw_ui(&status,20.0,73.0,18.0,WHITE);
-        draw_rectangle(side_x,TOP,SIDE,sh-TOP,Color::from_rgba(26,36,30,255));
-        self.draw_ui(tr(self.lang,Key::Campaign),side_x+16.0,TOP+35.0,23.0,GOLD);
-        let title=localization::mission_title(self.lang,&self.mission.title);
-        let name=if title.chars().count()>30{
-            title.chars().take(27).collect::<String>()+"..."
-        }else{title.to_string()};
-        self.draw_ui(&name,side_x+16.0,TOP+66.0,17.0,WHITE);
-        let race=match (self.lang,self.simulation.human_race){
-            (Language::Russian,0)=>"Амазонки",
-            (Language::Russian,1)=>"Пиммоны",
-            (Language::Russian,2)=>"Саджики",
-            (Language::English,0)=>"Amazons",
-            (Language::English,1)=>"Pimmons",
-            (Language::English,2)=>"Sajiki",
-            _=>"?",
-        };
-        self.draw_ui(
-            &format!("{}: {}×{} | {}: {}",
-                tr(self.lang,Key::Map),
-                self.simulation.terrain.size,self.simulation.terrain.size,
-                tr(self.lang,Key::Race),race),
-            side_x+16.0,TOP+94.0,16.0,LIGHTGRAY
-        );
-        draw_line(side_x+10.0,TOP+110.0,sw-10.0,TOP+110.0,1.0,GRAY);
-        self.draw_ui(tr(self.lang,Key::BuildMenu),side_x+16.0,TOP+141.0,22.0,GOLD);
-        for (i,ty,key) in [(0,37,Key::House),(1,40,Key::TownHall),
-            (2,41,Key::Warehouse)]{
-            let y=TOP+170.0+i as f32*43.0;
-            let active=self.selected.build==Some(ty);
-            draw_rectangle(side_x+12.0,y,SIDE-24.0,34.0,
-                if active{Color::from_rgba(88,93,52,255)}
-                else{Color::from_rgba(49,60,43,255)});
-            self.draw_ui(tr(self.lang,key),side_x+20.0,y+23.0,17.0,WHITE);
-            if let Some(rule)=self.simulation.rules.get(
-                &rule_id(self.simulation.human_race,ty)){
-                let cost=if ru{
-                    format!("Д{} К{} Е{}",rule.cost[1].max(0),
-                        rule.cost[2].max(0),rule.cost[4].max(0))
-                }else{
-                    format!("W{} S{} F{}",rule.cost[1].max(0),
-                        rule.cost[2].max(0),rule.cost[4].max(0))
-                };
-                self.draw_ui(&cost,side_x+174.0,y+23.0,12.0,LIGHTGRAY);
-            }
-        }
-        self.draw_ui(tr(self.lang,Key::CancelBuild),side_x+17.0,
-            TOP+323.0,17.0,LIGHTGRAY);
-        let selected_count=self.selected.units.len().max(
-            usize::from(self.selected.object.is_some()));
-        self.draw_ui(&format!("{} ({})",tr(self.lang,Key::Selected),selected_count),
-            side_x+16.0,TOP+372.0,22.0,GOLD);
-        if let Some(id)=self.selected.object{
-            if let Some(o)=self.simulation.entity(id){
-                let rule=self.simulation.rule(o);
-                let label=localization::object_name(
-                    self.lang,rule.map_or("UNKNOWN",|r|r.name.as_str()),
-                    o.kind,o.object_type,rule.map_or(-1,|r|r.class));
-                let shown=if label.chars().count()>27{
-                    label.chars().take(24).collect::<String>()+"..."
-                }else{label.to_string()};
-                self.draw_ui(&shown,side_x+16.0,TOP+403.0,18.0,WHITE);
-                self.draw_ui(&format!("{} {} | {} {} | {},{}",
-                    tr(self.lang,Key::Type),o.object_type,
-                    tr(self.lang,Key::Health),o.hp,o.x,o.y),
-                    side_x+16.0,TOP+429.0,15.0,LIGHTGRAY);
-                self.draw_ui(&format!("{}: {}",
-                    tr(self.lang,Key::Task),
-                    localization::task_name(self.lang,&o.task)),
-                    side_x+16.0,TOP+455.0,17.0,YELLOW);
-                if o.kind==1&&!o.complete{
-                    self.draw_ui(&format!("{}: {}%",
-                        tr(self.lang,Key::Progress),o.construction),
-                        side_x+16.0,TOP+479.0,17.0,ORANGE);
-                }
-            }
-        }else{
-            self.draw_ui(tr(self.lang,Key::ChooseObject),
-                side_x+16.0,TOP+403.0,17.0,WHITE);
-        }
-        if let Some((x,y,w,h))=self.minimap_bounds(){
-            self.minimap(x,y,w,h);
-        }
-        draw_rectangle(0.0,sh-FOOT,sw,FOOT,Color::from_rgba(17,25,22,255));
-        self.draw_ui(tr(self.lang,Key::Help1),14.0,sh-30.0,18.0,LIGHTGRAY);
-        self.draw_ui(tr(self.lang,Key::Help2),14.0,sh-10.0,15.0,GRAY);
-        if let Some((message,until))=&self.toast{
-            if get_time()<*until{
-                let w=measure_text(message,self.ui_font.as_ref(),19,1.0).width+28.0;
-                draw_rectangle(18.0,TOP+20.0,w.min(sw-SIDE-30.0),42.0,
-                    Color::from_rgba(18,26,22,240));
-                self.draw_ui(message,27.0,TOP+49.0,19.0,YELLOW);
-            }
-        }
+        classic_ui::draw(self);
     }
     async fn run(mut self){
         loop{
