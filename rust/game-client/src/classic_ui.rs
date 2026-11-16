@@ -215,13 +215,58 @@ pub fn draw(g:&Game){
                         10.0,420.0,12.0,WHITE);
                     txt(g,&format!("X: {}    Y: {}",obj.x,obj.y),
                         10.0,447.0,12.0,LIGHTGRAY);
-                    txt(g,crate::localization::task_name(g.lang,&obj.task),
-                        10.0,475.0,12.0,GOLD);
-                    if obj.kind==1&&!obj.complete{
-                        txt(g,&format!("{}: {}%",
-                            if ru{"Постройка"}else{"Construction"},
-                            obj.construction),
-                            10.0,509.0,12.0,ORANGE);
+                    match obj.kind{
+                        0=>{
+                            txt(g,crate::localization::task_name(g.lang,&obj.task),
+                                10.0,475.0,12.0,GOLD);
+                            if obj.carrying>0{
+                                txt(g,&format!("{}: {}",
+                                    if ru{"Груз"}else{"Cargo"},obj.carrying),
+                                    10.0,505.0,12.0,WHITE);
+                            }
+                        }
+                        1=>{
+                            let state=if !obj.complete{
+                                if ru{"Строительство"}else{"Under construction"}
+                            }else if ru{"Построено"}else{"Completed"};
+                            txt(g,state,10.0,475.0,13.0,
+                                if obj.complete{GREEN}else{ORANGE});
+                            if let Some(r)=rule{
+                                txt(g,&format!("{}: {} x {}",
+                                    if ru{"Размер"}else{"Footprint"},
+                                    r.size_x,r.size_y),
+                                    10.0,502.0,12.0,LIGHTGRAY);
+                                txt(g,&format!("{}: {}  {}: {}",
+                                    if ru{"Древ."}else{"Wood"},r.cost[1],
+                                    if ru{"Кам."}else{"Stone"},r.cost[2]),
+                                    10.0,529.0,12.0,LIGHTGRAY);
+                            }
+                            if !obj.complete{
+                                txt(g,&format!("{}: {}%",
+                                    if ru{"Готовность"}else{"Progress"},
+                                    obj.construction),
+                                    10.0,562.0,12.0,ORANGE);
+                                button(g,if ru{"ПРОДОЛЖИТЬ СТРОЙКУ"}
+                                    else{"RESUME CONSTRUCTION"},
+                                    8.0,581.0,176.0,35.0,false,true);
+                            }else if obj.object_type==40||obj.object_type==41{
+                                txt(g,if ru{"Хранение: 25 / вид"}
+                                    else{"Storage: 25 per good"},
+                                    10.0,564.0,12.0,WHITE);
+                            }
+                        }
+                        2=>{
+                            let class=rule.map_or(-1,|r|r.class);
+                            let category=match class{
+                                8=>if ru{"Дерево"}else{"Tree"},
+                                9|10..=12=>if ru{"Растение"}else{"Plant"},
+                                13=>if ru{"Камень"}else{"Stone"},
+                                7=>if ru{"Животное"}else{"Animal"},
+                                _=>if ru{"Природный объект"}else{"Nature"},
+                            };
+                            txt(g,category,10.0,475.0,13.0,GOLD);
+                        }
+                        _=>{}
                     }
                 }
             }else{
@@ -300,6 +345,30 @@ pub fn click(g:&mut Game,mouse:Vec2,left:bool)->bool{
                 return true
             }
         }
+    }
+    if g.ui.page==HudPage::Selection &&
+        in_rect(local,8.0,581.0,176.0,35.0){
+        if let Some(site)=g.selected.object{
+            let can_resume=g.simulation.entity(site)
+                .is_some_and(|o|o.kind==1&&!o.complete);
+            if can_resume{
+                let candidates:Vec<u32>=g.simulation.objects.iter()
+                    .filter(|o|o.kind==0&&o.group==g.simulation.human_race
+                        &&o.object_type==11&&matches!(o.task,game_core::sim::Task::Idle))
+                    .map(|o|o.id).collect();
+                let resumed=candidates.into_iter().any(|worker|
+                    g.simulation.order_construct(worker,site).is_ok()
+                );
+                g.notify(if resumed{
+                    if g.lang==crate::localization::Language::Russian{
+                        "Строитель направлен на стройку"
+                    }else{"Builder assigned to site"}
+                }else if g.lang==crate::localization::Language::Russian{
+                    "Нет свободного строителя с маршрутом"
+                }else{"No idle builder has a route"});
+            }
+        }
+        return true
     }
     if g.ui.page==HudPage::Settings{
         for (i,y) in [383.0,435.0,487.0,539.0].iter().enumerate(){
