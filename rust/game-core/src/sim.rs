@@ -19,6 +19,12 @@ const NEIGHBOURS:[(i32,i32);8]=[
 ];
 /// Native OD directions are clockwise starting from the back view.
 /// These indexes match MG0..MG7 in the original game archives.
+/// Native animals alternate roaming and their original ID3 idle animation.
+/// The period is deterministic per entity, independent of frame rate.
+pub fn animal_cycle_phase(id:u32,tick:u64)->u64{
+    let period=140+(id as u64*29)%55;
+    (tick+id as u64*13)%period
+}
 pub fn facing_for_delta(dx:i32,dy:i32)->Option<u8>{
     match (dx.signum(),dy.signum()){
         (-1,-1)=>Some(0),(-1,0)=>Some(1),(-1,1)=>Some(2),
@@ -406,6 +412,38 @@ impl Simulation {
         let mut removed:HashSet<u32>=HashSet::new();
         for id in ids{
             let Some(i)=self.objects.iter().position(|o|o.id==id) else{continue};
+            if self.objects[i].kind==2{
+                // Wild animals (ODB class 7) have MG0..7 walking and ID3
+                // idle animations. A tiny deterministic wander gives the
+                // renderer real facing/motion events instead of looping all
+                // nature sprites or replaying harvest animations.
+                let animal=self.rules.get(&rule_id(
+                    self.objects[i].group,self.objects[i].object_type
+                )).is_some_and(|rule|rule.class==7);
+                if animal {
+                    let phase=animal_cycle_phase(id,self.tick);
+                    if phase==0{
+                        let (x,y)=(self.objects[i].x,self.objects[i].y);
+                        let dir=((self.tick/10+id as u64*37)%8) as usize;
+                        let n=self.terrain.size as i32;
+                        for j in 0..NEIGHBOURS.len(){
+                            let (dx,dy)=NEIGHBOURS[(dir+j)%8];
+                            let to=(x+dx,y+dy);
+                            if to.0<0||to.1<0||to.0>=n||to.1>=n{continue}
+                            if self.blocked(to.0,to.1,Some(id)){continue}
+                            self.objects[i].x=to.0;
+                            self.objects[i].y=to.1;
+                            if let Some(facing)=facing_for_delta(dx,dy){
+                                self.objects[i].facing=facing;
+                            }
+                            break
+                        }
+                    }else if phase==20{
+                        self.objects[i].facing=3; // native animal idle ID3
+                    }
+                }
+                continue
+            }
             if self.objects[i].kind!=0{continue}
             let task=self.objects[i].task.clone();
             match task{
@@ -796,6 +834,27 @@ mod tests{
         assert_eq!(sim.entity(1).unwrap().carrying,0);
         assert_eq!(sim.entity(1).unwrap().task,Task::Idle);
         assert_eq!(sim.goods[GOOD_WOOD],0);
+    }
+    #[test]
+    fn wild_animals_wander_without_touching_wood_or_berries(){
+        let mut sim=setup();
+        let mut rule=house_rule(33);
+        rule.kind=2;rule.group=6;rule.id=rule_id(6,33);
+        rule.class=7;
+        sim.rules.insert(rule.id,rule);
+        sim.objects.push(Entity{
+            id:3,kind:2,group:6,object_type:33,owner:-1,
+            x:35,y:35,hp:50,complete:true,construction:100,
+            task:Task::Idle,carrying:0,facing:4
+        });
+        let before=(sim.entity(3).unwrap().x,sim.entity(3).unwrap().y);
+        for _ in 0..240{sim.step()}
+        let animal=sim.entity(3).unwrap();
+        assert!(!sim.terrain.water(animal.x,animal.y));
+        assert_ne!((animal.x,animal.y),before);
+        assert!(animal.facing<8);
+        // Static wood resource was not harvested by an animal.
+        assert!(sim.entity(2).is_some());
     }
     #[test]
     fn facing_uses_original_eight_directions_and_survives_snapshot(){
