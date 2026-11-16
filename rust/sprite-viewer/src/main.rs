@@ -7,6 +7,7 @@
 
 use game_core::gd::{OpacityMode, decode_gd_frames, gd_index_size, parse_gd_index};
 mod catalog;
+mod scene;
 
 use macroquad::prelude::*;
 use std::{
@@ -135,6 +136,17 @@ fn checkerboard(width: f32, height: f32, cell: f32) {
 
 #[macroquad::main(window_conf)]
 async fn main() {
+    if env::args_os().nth(1).is_some_and(|v| v.to_string_lossy() == "--scene") {
+        let args: Vec<_> = env::args_os().skip(2).collect();
+        if args.len() != 2 {
+            eprintln!("Usage: cargo run --manifest-path rust/sprite-viewer/Cargo.toml -- --scene <base-dv.gd> <addon.gd>");
+            return;
+        }
+        if let Err(err) = scene::run(PathBuf::from(&args[0]), PathBuf::from(&args[1])).await {
+            eprintln!("Scene error: {err}");
+        }
+        return;
+    }
     // Catalog mode preserves the two legacy entry points: direct single GD
     // animation and exported PNG folder.
     if env::args_os().nth(1).is_some_and(|v| v.to_string_lossy() == "--catalog") {
