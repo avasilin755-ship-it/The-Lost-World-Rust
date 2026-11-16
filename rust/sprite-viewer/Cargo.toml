@@ -6,7 +6,8 @@ publish = false
 
 [dependencies]
 macroquad = "=0.4.16"
+game-core = { path = "../game-core" }
 
-# This small desktop tool has a separate Cargo workspace so that
-# GUI dependencies do not affect the portable game-core library.
+# The GUI has a separate Cargo workspace: Macroquad is not a dependency
+# of the portable game-core library.
 [workspace]
