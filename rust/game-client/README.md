@@ -226,3 +226,31 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\rust\game-client\launch.ps
 и автоматические регрессии. Визуально подтвердить отображение
 кириллицы, разбиение надписей и плавность анимации можно только
 запуском в Windows с оригинальными ресурсами.
+
+
+## November 16, 2026 - classic HUD / terrain / rules playtest update
+
+See [TEST_CHECKLIST.md](TEST_CHECKLIST.md) for precise Windows acceptance tests.
+
+- Real original race UI background and function icons from local interface.gd.
+  Original layout reference: docs/ui/side-panel.md, 192x768 logical panel.
+  World fills the full viewport height; top mini-map, layer toggles,
+  zoom ring, treasury chest, town, build, selection and settings pages.
+  Font rendering remains in Russian and English (F10).
+- Torus rendering across map boundaries, including camera indicator and
+  animated sprites; improved height-adjusted world picking.
+- Original terrain material cross-fade approximation instead of hard seams
+  between grass / snow / rock. Coastline still needs in-game verification.
+- Desktop 60 FPS cap (TLW_MAX_FPS=30..144), F3 performance overlay.
+- Rasterized terrain/object blockers accelerate A* routing.
+- Original-style paved, leveled foundations when loading base-map buildings
+  and after new construction; refreshed minimap after build/load.
+- Work roles: builder cannot harvest nature. Porter harvests bushes/crops,
+  woodcutter harvests trees, stonemason extracts stone. A new base
+  mission lacking surface workers starts with a builder and two porters.
+- TLWSNAP4 stores permanent terrain changes. Earlier TLWSNAP1/2/3 saves
+  remain loadable, although their original format cannot include edits.
+
+This update has automated compile/unit tests, but real original artwork,
+in-game rendering, Windows responsiveness and full scenario behavior
+require the player's next screenshot/video. It is not a complete port.
