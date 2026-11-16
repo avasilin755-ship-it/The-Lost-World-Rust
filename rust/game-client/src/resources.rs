@@ -251,6 +251,20 @@ impl GdArchive{
         if layers.is_empty(){None}else{Some(SpriteArt{layers})}
     }
 }
+/// Native nature starting animation action, from ODB class/product.
+/// Trees MUST show CA0 (a standing tree), rather than MS0 (felled).
+/// The first frame of bushes and stone MS0 is their intact stage.
+pub fn nature_initial_action(class:i32,product:i32)->u8{
+    match class{
+        8=>4,        // standing tree (CA0)
+        9|13=>0,     // berry bushes and stone (MS0)
+        10..=12=>1,  // growing crops / mushrooms (ST0)
+        _=>match product{
+            0=>1,1=>4,_=>0
+        },
+    }
+}
+
 /// Return a prioritized list of descriptor indices for this object state.
 /// Prefer an exact facing; fall back to the same action's direction zero,
 /// then to walking in the same facing, never to a random nonempty action.
@@ -341,6 +355,15 @@ impl WorldArt{
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn nature_uses_original_intact_resource_animation_slot(){
+        assert_eq!(nature_initial_action(8,1),4); // standing tree CA0
+        assert_eq!(nature_initial_action(9,2),0); // berries MS0
+        assert_eq!(nature_initial_action(13,2),0); // rock MS0
+        assert_eq!(nature_initial_action(10,0),1); // crop ST0
+        assert_eq!(nature_initial_action(0,1),4); // ODB product fallback
+        assert_eq!(nature_initial_action(0,-1),0);
+    }
     #[test]
     fn original_od_action_direction_indexing(){
         // Eight facing rows per action in the native OD kind-0 table.
