@@ -951,29 +951,97 @@ impl Game{
         }
     }
 
+    /// The original minimap is *transposed* and camera-centred.
+    /// These offsets are in 152x152 source pixels, not screen pixels.
+    fn minimap_scroll(&self)->(i32,i32){
+        let n=self.simulation.terrain.size as i32;
+        let mut cell=unproject(self.camera);
+        let h=self.simulation.terrain.height[
+            self.simulation.terrain.index(cell.x.round() as i32,cell.y.round() as i32)
+        ] as i32;
+        let correction=(h-128)/44;
+        cell+=vec2(correction as f32,correction as f32);
+        let world_x=(cell.x.round() as i32).rem_euclid(n);
+        let world_y=(cell.y.round() as i32).rem_euclid(n);
+        (
+            (world_y*MINI_PX as i32/n-MINI_PX as i32/2)
+                .rem_euclid(MINI_PX as i32),
+            (world_x*MINI_PX as i32/n-MINI_PX as i32/2)
+                .rem_euclid(MINI_PX as i32)
+        )
+    }
     fn minimap(&self,x:f32,y:f32,width:f32,height:f32){
         let n=self.simulation.terrain.size as f32;
-        draw_texture_ex(&self.minimap_ground,x,y,WHITE,DrawTextureParams{
-            dest_size:Some(vec2(width,height)),..Default::default()
-        });
-        for obj in &self.simulation.objects{
-            if (obj.kind==1&&self.ui.show_buildings)
-                ||(obj.kind==0&&self.ui.show_units)
-                ||(obj.kind==2&&self.ui.show_resources){
-                let color=if obj.group==self.simulation.human_race{GOLD}else{RED};
-                draw_rectangle(x+obj.x as f32/n*width,
-                    y+obj.y as f32/n*height,3.0,3.0,color)
+        let dim=MINI_PX as f32;
+        let (scroll_col,scroll_row)=self.minimap_scroll();
+        let sx=scroll_col as f32;
+        let sy=scroll_row as f32;
+        let xsplit=dim-sx;
+        let ysplit=dim-sy;
+        // Four tiled regions of one pre-computed original minimap texture.
+        // Moving the camera across a world edge simply wraps its source.
+        for (dx,source_x,source_w) in
+            [(0.0,sx,xsplit),(xsplit,0.0,sx)]{
+            for (dy,source_y,source_h) in
+                [(0.0,sy,ysplit),(ysplit,0.0,sy)]{
+                if source_w<=0.0||source_h<=0.0{continue}
+                draw_texture_ex(
+                    &self.minimap_ground,
+                    x+dx/dim*width,y+dy/dim*height,
+                    WHITE,DrawTextureParams{
+                        source:Some(Rect::new(
+                            source_x,source_y,source_w,source_h
+                        )),
+                        dest_size:Some(vec2(
+                            source_w/dim*width,source_h/dim*height
+                        )),
+                        ..Default::default()
+                    }
+                );
             }
         }
-        // Lightweight camera indicator, updated per frame.
-        let centre=unproject(self.camera);
-        // Camera can cross the torus seam; normalize the minimap indicator
-        // to 0..n rather than letting it disappear off its panel.
-        draw_circle_lines(
-            x+centre.x.rem_euclid(n)/n*width,
-            y+centre.y.rem_euclid(n)/n*height,
-            7.0,1.0,WHITE
-        );
+        // Object markers preserve the same transposed world-to-map
+        // coordinates and use original race colours rather than friend/foe.
+        for obj in &self.simulation.objects{
+            let active=(obj.kind==1&&self.ui.show_buildings)
+                ||(obj.kind==0&&self.ui.show_units)
+                ||(obj.kind==2&&self.ui.show_resources);
+            if !active{continue}
+            let color=if obj.kind==2{
+                match self.simulation.rule(obj).map_or(-1,|r|r.class){
+                    8=>Color::from_rgba(90,255,60,255),
+                    13=>Color::from_rgba(239,247,255,255),
+                    _=>Color::from_rgba(255,220,120,255),
+                }
+            }else{match obj.group{
+                0=>RED,1=>Color::from_rgba(0,180,255,255),
+                2=>YELLOW,_=>WHITE,
+            }};
+            let u=((obj.y as f32/n*dim)-sx).rem_euclid(dim);
+            let v=((obj.x as f32/n*dim)-sy).rem_euclid(dim);
+            draw_rectangle(
+                x+u/dim*width,y+v/dim*height,
+                (2.0*width/dim).max(1.6),(2.0*height/dim).max(1.6),color
+            );
+        }
+        // The source game uses a fixed-centre white diamond whose size
+        // depends on map extent and zoom, not a moving circular dot.
+        let cells_across=(screen_width()-hud_width())*std::f32::consts::SQRT_2
+            /(45.0*self.zoom);
+        let radius_px=2.0+(cells_across*dim/n*0.5).floor();
+        let radius=radius_px.clamp(2.0,dim*0.43);
+        let cx=x+width*0.5;
+        let cy=y+height*0.5;
+        let rx=radius*width/dim;
+        let ry=radius*height/dim;
+        for (from,to) in [
+            (vec2(cx,cy-ry),vec2(cx+rx,cy)),
+            (vec2(cx+rx,cy),vec2(cx,cy+ry)),
+            (vec2(cx,cy+ry),vec2(cx-rx,cy)),
+            (vec2(cx-rx,cy),vec2(cx,cy-ry))
+        ]{
+            draw_line(from.x,from.y,to.x,to.y,1.0,WHITE)
+        }
     }
     fn minimap_bounds(&self)->Option<(f32,f32,f32,f32)>{
         if !self.minimap{return None}
@@ -984,8 +1052,17 @@ impl Game{
     fn minimap_cell(&self,p:Vec2)->Option<(i32,i32)>{
         let (x,y,w,h)=self.minimap_bounds()?;
         if p.x<x||p.y<y||p.x>=x+w||p.y>=y+h{return None}
-        let n=self.simulation.terrain.size as f32;
-        Some((((p.x-x)/w*n) as i32,((p.y-y)/h*n) as i32))
+        let n=self.simulation.terrain.size as i32;
+        let (sx,sy)=self.minimap_scroll();
+        let col=((p.x-x)/w*MINI_PX as f32).floor() as i32;
+        let row=((p.y-y)/h*MINI_PX as f32).floor() as i32;
+        // Mouse horizontal offset means world Y, vertical means world X.
+        let source_col=(col+sx).rem_euclid(MINI_PX as i32);
+        let source_row=(row+sy).rem_euclid(MINI_PX as i32);
+        Some((
+            ((source_row*n+76)/MINI_PX as i32).rem_euclid(n),
+            ((source_col*n+76)/MINI_PX as i32).rem_euclid(n)
+        ))
     }
     fn draw_selection_marquee(&self){
         if self.selected.build.is_some(){return}
