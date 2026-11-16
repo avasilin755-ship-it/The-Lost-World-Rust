@@ -41,6 +41,8 @@ pub fn world_to_screen(
 pub struct TileSet {
     pub textures:Vec<Texture2D>,
     pub pick:[u8;256],
+    /// True per-tile RGB mean from the original 64x64 OS artwork.
+    pub minimap_rgb:Vec<[u8;3]>,
 }
 pub struct TerrainArt{
     sets:HashMap<String,TileSet>,
@@ -70,14 +72,27 @@ impl TerrainArt{
             let tiles=parse_os(&bytes)
                 .map_err(|e|format!("Cannot decode {}: {e}",path.display()))?;
             let mut textures=Vec::with_capacity(tiles.tiles.len());
+            let mut minimap_rgb=Vec::with_capacity(tiles.tiles.len());
             for tile in tiles.tiles{
+                let mut sum=[0u64;3];
+                let pixel_count=(tile.width*tile.height) as u64;
+                for px in tile.rgba.chunks_exact(4){
+                    for channel in 0..3{sum[channel]+=u64::from(px[channel])}
+                }
+                minimap_rgb.push([
+                    (sum[0]/pixel_count) as u8,
+                    (sum[1]/pixel_count) as u8,
+                    (sum[2]/pixel_count) as u8,
+                ]);
                 let texture=Texture2D::from_rgba8(
                     tile.width as u16,tile.height as u16,&tile.rgba
                 );
                 texture.set_filter(FilterMode::Nearest);
                 textures.push(texture);
             }
-            sets.insert(name.to_owned(),TileSet{textures,pick:tiles.pick});
+            sets.insert(name.to_owned(),TileSet{
+                textures,pick:tiles.pick,minimap_rgb
+            });
         }
         let mut start=0usize;
         let mut starts=Vec::new();
@@ -105,6 +120,20 @@ impl TerrainArt{
             }
         }
         result
+    }
+    /// Original minimap uses the mean RGB of each loaded .os tile,
+    /// not a binary green/blue approximation. Gold maps store global
+    /// palette indices; base game maps store indices local to class.
+    pub fn minimap_rgb(&self,terrain:&Terrain,x:i32,y:i32,stored:bool)->[u8;3]{
+        let idx=terrain.index(x,y);
+        let class=terrain.class[idx] as usize;
+        let name=self.class_names.get(class).copied().unwrap_or("wiese");
+        let tiles=&self.sets[name].minimap_rgb;
+        let variant=terrain.tile[idx] as usize;
+        let local=if stored{
+            variant.saturating_sub(*self.starts.get(class).unwrap_or(&0))
+        }else{variant};
+        tiles[local%tiles.len()]
     }
     fn get(&self,name:&str,index:usize)->&Texture2D{
         let set=&self.sets[name];
