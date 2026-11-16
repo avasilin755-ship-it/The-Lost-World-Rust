@@ -13,3 +13,5 @@ pub mod terrain;
 pub mod sim;
 
 pub mod scheduler;
+
+pub mod economy;
