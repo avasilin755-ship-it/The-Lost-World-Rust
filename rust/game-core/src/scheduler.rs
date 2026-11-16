@@ -92,7 +92,7 @@ impl TimingWheel{
     /// Original 0-delay insertions can re-run in the current tick; a
     /// generous per-step cap prevents malformed replay files hanging.
     pub fn step<F>(&mut self,mut run:F)->Result<usize,WheelError>
-    where F:FnMut(Job)->u16 {
+    where F:FnMut(&mut Job)->u16 {
         let mut count=0;
         while let Some(mut job)=self.slots[self.current].pop(){
             count+=1;
@@ -103,14 +103,22 @@ impl TimingWheel{
             if job.cancelled&&job.hold==0{continue}
             if job.hold>0{
                 let hold=job.hold;
-                // In the original, a held job is deferred, without running.
-                if job.cancelled{continue}
+                // A cancelled, held job is still deferred in the original;
+                // it is deleted only when the hold is released.
                 self.schedule(job,hold);
                 continue
             }
-            let delay=run(job);
-            if delay>0&&usize::from(delay)<SLOT_COUNT{
-                self.schedule(job,delay);
+            let delay=run(&mut job);
+            if delay>0{
+                let actual=delay.max(job.hold);
+                if usize::from(actual)>=SLOT_COUNT{
+                    return Err(WheelError::InvalidDelay)
+                }
+                self.schedule(job,actual);
+            }else if job.hold>0{
+                let hold=job.hold;
+                job.cancelled=true;
+                self.schedule(job,hold);
             }
         }
         self.tick+=1;
@@ -164,6 +172,37 @@ mod tests{
             wheel.step(|j|{hits.push(j.kind);0}).unwrap();
         }
         assert_eq!(hits,vec![JobKind::Custom(2)]);
+    }
+    #[test]
+    fn cancellation_waits_for_hold_to_be_released(){
+        let mut wheel=TimingWheel::new();
+        let id=wheel.add(JobKind::Custom(9),1).unwrap();
+        wheel.hold(id,2).unwrap();
+        wheel.cancel(id);
+        for _ in 0..4{
+            wheel.step(|_|panic!("cancelled held job must not execute")).unwrap();
+        }
+        assert_eq!(wheel.jobs_pending(),1);
+        wheel.hold(id,0).unwrap();
+        for _ in 0..5{
+            wheel.step(|_|panic!("cancelled job must not execute")).unwrap();
+        }
+        assert_eq!(wheel.jobs_pending(),0);
+    }
+    #[test]
+    fn callback_can_put_a_job_on_hold_before_deletion(){
+        let mut wheel=TimingWheel::new();
+        let id=wheel.add(JobKind::Custom(5),0).unwrap();
+        wheel.step(|job|{
+            job.hold=2;
+            0
+        }).unwrap();
+        assert_eq!(wheel.jobs_pending(),1);
+        wheel.hold(id,0).unwrap();
+        for _ in 0..4{
+            wheel.step(|_|panic!("cancelled job must not run again")).unwrap();
+        }
+        assert_eq!(wheel.jobs_pending(),0);
     }
     #[test]
     fn rejects_out_of_range_delays(){
