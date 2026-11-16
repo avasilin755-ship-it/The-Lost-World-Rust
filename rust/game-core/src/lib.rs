@@ -6,3 +6,4 @@
 pub mod gd;
 pub mod png;
 pub mod od;
+pub mod os;
