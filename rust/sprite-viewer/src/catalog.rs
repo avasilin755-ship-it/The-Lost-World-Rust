@@ -221,6 +221,9 @@ pub async fn run(base_path: PathBuf, addon_path: PathBuf) -> Result<(), String> 
             selected = 0;
             scroll = 0;
             active = None;
+            textures.clear();
+            load_error = None;
+            frame = 0;
         }
 
         let (mx, my) = mouse_position();
@@ -316,7 +319,7 @@ pub async fn run(base_path: PathBuf, addon_path: PathBuf) -> Result<(), String> 
         if is_key_pressed(KeyCode::Comma) {
             fps = (fps - 1.0).max(1.0);
         }
-        if is_key_pressed(KeyCode::B) && is_key_down(KeyCode::LeftControl) {
+        if is_key_pressed(KeyCode::F2) {
             checkerboard = !checkerboard;
         }
         if playing && textures.len() > 1 {
@@ -399,7 +402,7 @@ pub async fn run(base_path: PathBuf, addon_path: PathBuf) -> Result<(), String> 
             10.0, sh - 26.0, 16.0, LIGHTGRAY,
         );
         draw_text(
-            "SPACE Play | +/- Zoom | ,/. FPS | CTRL+B Background | ESC Clear / Exit",
+            "SPACE Play | +/- Zoom | ,/. FPS | F2 Background | ESC Clear / Exit",
             10.0, sh - 8.0, 14.0, TEXT_FAINT,
         );
 
