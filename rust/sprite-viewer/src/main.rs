@@ -8,6 +8,7 @@
 use game_core::gd::{OpacityMode, decode_gd_frames, gd_index_size, parse_gd_index};
 mod catalog;
 mod scene;
+mod scene_terrain;
 
 use macroquad::prelude::*;
 use std::{
