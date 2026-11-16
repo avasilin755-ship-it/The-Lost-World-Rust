@@ -33,3 +33,7 @@ tools/recorder/out/
 rec/
 
 /target/
+
+# Local game saves / original copyrighted game assets
+/saves/
+/GameAssets/
