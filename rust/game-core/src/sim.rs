@@ -160,6 +160,29 @@ impl Simulation {
         let dx=dx.min(n-dx);let dy=dy.min(n-dy);
         10*(dx.max(dy)-dx.min(dy))+14*dx.min(dy)
     }
+    /// One occupancy raster per route avoids an O(objects) query for
+    /// each A* neighbour. This matters on maps with thousands of trees.
+    fn blocked_grid(&self,ignore:Option<u32>)->Vec<bool>{
+        let n=self.terrain.size as i32;
+        let mut grid=Vec::with_capacity(self.terrain.size*self.terrain.size);
+        for y in 0..n{
+            for x in 0..n {grid.push(self.terrain.water(x,y))}
+        }
+        for obj in &self.objects{
+            if obj.kind==0||Some(obj.id)==ignore{continue}
+            let (sx,sy)=if obj.kind==1{
+                self.rules.get(&rule_id(obj.group,obj.object_type))
+                    .map_or((1,1),|r|(r.size_x.clamp(1,32),r.size_y.clamp(1,32)))
+            }else{(1,1)};
+            for dx in 0..sx{
+                for dy in 0..sy{
+                    let i=self.terrain.index(obj.x-dx,obj.y-dy);
+                    grid[i]=true;
+                }
+            }
+        }
+        grid
+    }
     pub fn find_path(
         &self,start:(i32,i32),goal:(i32,i32),ignore:Option<u32>,
     )->Result<Vec<(i32,i32)>,GameError>{
@@ -167,7 +190,9 @@ impl Simulation {
         let start=(start.0.rem_euclid(n),start.1.rem_euclid(n));
         let goal=(goal.0.rem_euclid(n),goal.1.rem_euclid(n));
         if start==goal{return Ok(Vec::new())}
-        if self.blocked(goal.0,goal.1,ignore){return Err(GameError::Occupied)}
+        let occupancy=self.blocked_grid(ignore);
+        let is_blocked=|x:i32,y:i32| occupancy[self.terrain.index(x,y)];
+        if is_blocked(goal.0,goal.1){return Err(GameError::Occupied)}
         let mut frontier:BinaryHeap<(Reverse<i32>,Reverse<i32>,(i32,i32))>=BinaryHeap::new();
         frontier.push((Reverse(self.distance_heuristic(start.0,start.1,goal)),Reverse(0),start));
         let mut best:HashMap<(i32,i32),i32>=HashMap::new();
@@ -190,10 +215,10 @@ impl Simulation {
             if visited>30_000{return Err(GameError::NoPath)}
             for &(dx,dy) in &NEIGHBOURS{
                 let next=((cell.0+dx).rem_euclid(n),(cell.1+dy).rem_euclid(n));
-                if self.blocked(next.0,next.1,ignore){continue}
+                if is_blocked(next.0,next.1){continue}
                 // Prevent diagonal steps through the corners of occupied cells.
-                if dx!=0 && dy!=0 && (self.blocked(cell.0+dx,cell.1,ignore)
-                    ||self.blocked(cell.0,cell.1+dy,ignore)){continue}
+                if dx!=0 && dy!=0 && (is_blocked(cell.0+dx,cell.1)
+                    ||is_blocked(cell.0,cell.1+dy)){continue}
                 let step=if dx==0||dy==0{10}else{14};
                 let next_cost=cost+step;
                 if next_cost<*best.get(&next).unwrap_or(&i32::MAX){
