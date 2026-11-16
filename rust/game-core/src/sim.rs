@@ -329,6 +329,9 @@ impl Simulation {
     /// until settlement founding is implemented.
     pub fn can_build(&self,unit:u32,rule_id:u32,at:(i32,i32))->Result<(),GameError>{
         if !self.unit_owned(unit){return Err(GameError::NotOwned)}
+        if self.entity(unit).is_some_and(|o|o.object_type!=11){
+            return Err(GameError::WrongWorker)
+        }
         if !matches!(self.entity(unit).unwrap().task,Task::Idle){
             return Err(GameError::Busy)
         }
@@ -397,7 +400,7 @@ impl Simulation {
         let id=self.next_id;
         self.objects.push(Entity{
             id,kind:1,group:rule.group,object_type:rule.object_type,
-            owner:self.human_race,x:at.0,y:at.1,hp:rule.hp.max(1),
+            owner:self.human_race,x:at.0,y:at.1,hp:(rule.hp.max(1)+9)/10,
             complete:false,construction:0,task:Task::Idle,carrying:0,facing:4
         });
         let path=match self.adjacent_to_footprint(
@@ -589,8 +592,26 @@ impl Simulation {
                     }
                 }
                 Task::Constructing{site}=>{
-                    if let Some(building)=self.objects.iter_mut().find(|o|o.id==site){
-                        building.construction=(building.construction+1).min(100);
+                    // Original builder: work and material actions are polled
+                    // every 15 ticks; a building has at least 10 work ticks.
+                    // We preserve source-like TOTAL duration (materials +
+                    // work) and ten animation stages. Porter deliveries and
+                    // per-good site stock are not yet modelled separately.
+                    let Some(target)=self.entity(site) else{
+                        self.objects[i].task=Task::Idle;continue
+                    };
+                    let Some(rule)=self.rule(target) else{
+                        self.objects[i].task=Task::Idle;continue
+                    };
+                    let total:usize=rule.cost.iter().map(|&v|v.max(0) as usize).sum();
+                    let work=total.max(10);
+                    let interval=((work+total)*15/10).max(15) as u64;
+                    let full_hp=rule.hp.max(1);
+                    if self.tick%interval!=0{continue}
+                    if let Some(building)=self.entity_mut(site){
+                        building.construction=(building.construction+10).min(100);
+                        building.hp=((i32::from(building.construction)*full_hp)/100)
+                            .clamp(1,full_hp);
                         if building.construction==100{
                             building.complete=true;
                             self.objects[i].task=Task::Idle;
@@ -949,6 +970,7 @@ mod tests{
     #[test]
     fn construction_reserves_all_cells_and_debits_only_once(){
         let mut sim=setup();
+        sim.entity_mut(1).unwrap().object_type=11;
         sim.rules.insert(rule_id(2,37),house_rule(37));
         sim.goods[GOOD_WOOD]=3;sim.goods[GOOD_STONE]=2;
         let site=sim.build(1,rule_id(2,37),(25,25)).unwrap();
@@ -970,6 +992,7 @@ mod tests{
     #[test]
     fn duplicate_town_halls_are_blocked_until_settlements_are_supported(){
         let mut sim=setup();
+        sim.entity_mut(1).unwrap().object_type=11;
         let mut hall=house_rule(40);
         hall.cost=[0;9];
         sim.rules.insert(rule_id(2,40),hall);
