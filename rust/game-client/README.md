@@ -30,13 +30,20 @@ Mission records are ordered by their original numeric index, not file position.
 
 ## Controls
 
-- Left click: select a unit, building, animal or tree
-- Right click: move selected unit, gather a nature object, or resume unfinished construction
+- Left click: select a unit, building, animal or tree by its visible sprite
+- Left drag in the world: select a rectangle of up to 12 friendly units
+- Shift + click/drag: add friendly units; Ctrl + click: toggle one unit
+- Double click on a friendly unit: select nearby friendly units of the same type
+- Right click: issue an order for all selected units, harvest, or resume unfinished construction
+- Right drag: no order (matches the original drag-vs-click threshold)
+- Left click on the minimap: centre camera on that position
+- Right click on the minimap: move all selected friendly units to that position
+- Left click the side-panel build rows: select a construction tool
 - 1 / 2 / 3: house / town hall / warehouse construction tool
 - Left click terrain with construction tool and selected unit: place site
 - 0 / Esc: cancel construction placement
-- WASD / arrows: pan the world camera
-- Mouse wheel: zoom
+- WASD / arrows or moving the mouse to the world edge: pan the camera
+- Mouse wheel: zoom; Page Up / Page Down: far-out / normal zoom
 - Middle mouse drag: pan
 - X: explicitly discard undelivered cargo when no reachable storage exists (cargo is lost)
 - Building preview: green footprint means valid placement; red means invalid or worker busy
@@ -143,3 +150,37 @@ sprite cache is indexed by ID, action and facing rather than ID alone.
 CI verifies the Rust implementation, but the external original GD/OD
 archives are not included in the repository. Visual appearance of each
 race and nature type needs a real client check with those assets.
+
+## Native-control, wildlife animation and rendering performance update (2026-11-16)
+
+The rebuilt Rust client now follows the original control concepts from
+`docs/rendering/objects.md` and `docs/ui/side-panel.md`: alpha-visible object
+clicks, own-unit priority, group selection, drag-box selection, Shift/Ctrl
+selection semantics and group orders. The hit mask is currently generated
+from the *first* sprite frame, so exact hit pixels of an animated frame can
+still differ slightly from the historical compositor.
+
+Animal sprites of ODB class 7 use real 8-way MG motion and native ID3 idle
+cycles. A deterministic, limited roam scheduler is in the Rust simulation.
+This is not the full original animal-home/path-planning/eating/respawn job 0x24
+(`units-and-jobs.md` 7.7), which remains future restoration work.
+Idle workers can turn and play their actual OD ID3/ID5 animation when it
+exists; absent OD idle rows do not fall back to fake walking-in-place.
+
+Original GD animation layers are now distinguished by OD role flags.
+Independent random building details (RA*) animate individually instead of
+cycling synchronously. Doors and production/work layers remain stopped
+until the matching simulation event exists; they are not faked. Water
+and shoreline animation are retained.
+
+**Performance:** Minimap terrain is one uploaded GPU texture rather than
+thousands of rectangles each frame; the decoded sprite cache uses bounded
+LRU eviction instead of throwing all variants away; alpha hit tests use
+one-bit masks; terrain water/coast names no longer allocate a new String
+per rendered cell. The HUD displays live FPS and cache occupancy.
+
+Existing limitations include original sprite motion interpolation, complete
+building activity/door events, animal eating and regrowth, combat effects,
+speech/sounds, the original multi-page interface and all command categories.
+Regression tests and CI prove compilation and basic invariants, **not**
+visual equivalence with external original game data or a specific FPS gain.

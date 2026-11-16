@@ -10,7 +10,7 @@ mod resources;
 use game_core::{
     mission::{GameMap,Mission,parse_dvm,parse_mdb},
     rules::{parse_odb,merge_rules,rule_id},
-    sim::{Simulation,Entity,Task},
+    sim::{Simulation,Entity,Task,animal_cycle_phase,unit_idle_phase},
     terrain::{Terrain,generate_base},
 };
 use macroquad::prelude::*;
@@ -23,6 +23,28 @@ const FOOT:f32=55.0;
 const PAN_SPEED:f32=500.0;
 const TICK_SECONDS:f32=0.10;
 const MAX_TICKS_PER_FRAME:usize=5;
+/// Static minimap ground is uploaded to the GPU once per loaded map.
+/// Previously the client issued up to 65k individual mini-rect draws per frame.
+fn minimap_ground_texture(terrain:&Terrain)->Texture2D{
+    let n=terrain.size as u16;
+    let mut image=Image::gen_image_color(n,n,Color::from_rgba(71,104,49,255));
+    for y in 0..terrain.size{
+        for x in 0..terrain.size{
+            let color=if terrain.water(x as i32,y as i32){
+                Color::from_rgba(30,77,132,255)
+            }else{
+                let h=terrain.height[terrain.index(x as i32,y as i32)] as f32;
+                let factor=((h-128.0)*0.55).clamp(-23.0,23.0) as i32;
+                let add=|v:i32| (v+factor).clamp(0,255) as u8;
+                Color::from_rgba(add(71),add(104),add(49),255)
+            };
+            image.set_pixel(x as u32,y as u32,color);
+        }
+    }
+    let texture=Texture2D::from_image(&image);
+    texture.set_filter(FilterMode::Nearest);
+    texture
+}
 fn window_conf()->Conf{
     Conf{
         window_title:"THE LOST WORLD — RUST EDITION".into(),
@@ -101,6 +123,7 @@ fn human_worker_if_needed(sim:&mut Simulation,starts:&[(i32,i32)]){
 #[derive(Default)]
 struct Selection{
     unit:Option<u32>,
+    units:Vec<u32>,
     object:Option<u32>,
     build:Option<i32>,
     error:Option<(String,f64)>,
@@ -109,6 +132,7 @@ struct Game {
     simulation:Simulation,
     ground:TerrainArt,
     sprites:WorldArt,
+    minimap_ground:Texture2D,
     mission:Mission,
     camera:Vec2,
     zoom:f32,
@@ -118,6 +142,9 @@ struct Game {
     stored:bool,
     save_file:PathBuf,
     toast:Option<(String,f64)>,
+    left_press:Option<Vec2>,
+    right_press:Option<Vec2>,
+    last_click:Option<(u32,f64)>,
 }
 impl Game{
     fn new(
@@ -167,6 +194,7 @@ impl Game{
             terrain,rules,map.objects.clone(),human,race.gold,race.goods
         ).map_err(|e|e.to_string())?;
         human_worker_if_needed(&mut simulation,&map.starts);
+        let minimap_ground=minimap_ground_texture(&simulation.terrain);
         let sprites=WorldArt::open(base_gd,addon_gd)?;
         let focus=simulation.selected_unit_ids().first()
             .and_then(|id|simulation.entity(*id))
@@ -180,9 +208,10 @@ impl Game{
         let save_file=PathBuf::from("saves")
             .join(format!("{}_{index}.tlwsnap",mission_name.trim_end_matches(".mdb")));
         Ok(Self{
-            simulation,ground,sprites,mission,camera,zoom:1.0,
+            simulation,ground,sprites,minimap_ground,mission,camera,zoom:1.0,
             selected:Selection::default(),accumulator:0.0,
             minimap:true,stored:map.terrain.is_some(),save_file,toast:None,
+            left_press:None,right_press:None,last_click:None,
         })
     }
 
@@ -203,9 +232,185 @@ impl Game{
         println!("{message}");
         self.toast=Some((message,get_time()+4.0));
     }
+    /// OD action matching the visible object's gameplay state, for accurate
+    /// hit-testing across roofs, units, and tree canopies.
+    fn visual_action(&self,obj:&Entity)->u8{
+        if obj.kind==1{return u8::from(obj.complete)}
+        if obj.kind==2{
+            if self.simulation.rule(obj).is_some_and(|r|r.class==7){
+                let phase=animal_cycle_phase(obj.id,self.simulation.tick);
+                return if (20..=115).contains(&phase){3}else{0};
+            }
+            return self.simulation.rule(obj).map_or(0,|r|
+                resources::nature_initial_action(r.class,r.product))
+        }
+        if obj.kind==0{
+            return match obj.task{
+                Task::Walking{..} if obj.carrying>0=>4,
+                Task::Gathering{..}|Task::Constructing{..}=>2,
+                Task::Holding{..}|Task::Delivering{..}=>4,
+                Task::Idle if obj.carrying==0
+                    && unit_idle_phase(obj.id,self.simulation.tick)<20
+                    && self.sprites.has_slot(
+                        rule_id(obj.group,obj.object_type),3,obj.facing)=>3,
+                _=>0,
+            }
+        }
+        0
+    }
+    /// Hit the actual alpha shape, not just an object's anchor or a ground tile.
+    /// Priority follows the original game: unit, nature, building, tree.
+    fn hit_sprite(&mut self,mouse:Vec2,right:bool)->Option<u32>{
+        let mut candidates:Vec<(usize,i32,u32,Vec2,u32,u8,u8)>=Vec::new();
+        for o in &self.simulation.objects{
+            let p=self.screen(o.x as f32,o.y as f32);
+            if (p.x-mouse.x).abs()>480.0*self.zoom
+                ||(p.y-mouse.y).abs()>480.0*self.zoom{continue}
+            let class=self.simulation.rule(o).map_or(-1,|r|r.class);
+            let priority=if right{
+                match o.kind{
+                    0 if o.group!=self.simulation.human_race=>0,
+                    0=>1,
+                    2 if class!=8=>2,
+                    1 if o.group!=self.simulation.human_race=>3,
+                    1=>4,
+                    _=>5,
+                }
+            }else{
+                match o.kind{
+                    0 if self.simulation.unit_owned(o.id)=>0,
+                    0=>1,
+                    2 if class!=8=>2,
+                    1 if o.group==self.simulation.human_race=>3,
+                    1=>4,
+                    _=>5,
+                }
+            };
+            candidates.push((
+                priority,-(o.x+o.y),o.id,p,
+                rule_id(o.group,o.object_type),self.visual_action(o),o.facing
+            ));
+        }
+        candidates.sort_unstable_by_key(|v|(v.0,v.1));
+        for (_,_,id,p,oid,action,dir) in candidates{
+            if self.sprites.get(oid,action,dir).is_some_and(|art|
+                art.hit(p,self.zoom,mouse)){
+                return Some(id)
+            }
+        }
+        None
+    }
+    fn select_one(&mut self,hit:Option<u32>){
+        let shift=is_key_down(KeyCode::LeftShift)||is_key_down(KeyCode::RightShift);
+        let ctrl=is_key_down(KeyCode::LeftControl)||is_key_down(KeyCode::RightControl);
+        let unit=hit.filter(|&id|self.simulation.unit_owned(id));
+        if !shift && !ctrl{
+            self.selected.units.clear();
+        }
+        if let Some(id)=unit{
+            if ctrl {
+                if let Some(index)=self.selected.units.iter().position(|&other|other==id){
+                    self.selected.units.remove(index);
+                }else if self.selected.units.len()<12{
+                    self.selected.units.push(id);
+                }
+            }else if !self.selected.units.contains(&id)&&self.selected.units.len()<12{
+                self.selected.units.push(id);
+            }
+            let now=get_time();
+            if !shift&&!ctrl && self.last_click.is_some_and(|(previous,when)|
+                previous==id && now-when<0.36){
+                if let Some(origin)=self.simulation.entity(id){
+                    let kind=origin.object_type;
+                    let cell=(origin.x,origin.y);
+                    let ids=self.simulation.objects.iter()
+                        .filter(|o|o.kind==0&&self.simulation.unit_owned(o.id)
+                            &&o.object_type==kind
+                            &&(o.x-cell.0).abs()<=5&&(o.y-cell.1).abs()<=5)
+                        .take(12).map(|o|o.id).collect::<Vec<_>>();
+                    self.selected.units=ids;
+                }
+            }
+            self.last_click=Some((id,now));
+        }else{
+            self.last_click=None;
+        }
+        self.selected.unit=self.selected.units.first().copied();
+        self.selected.object=self.selected.unit.or(hit);
+    }
+    fn select_box(&mut self,a:Vec2,b:Vec2){
+        let x0=a.x.min(b.x);let x1=a.x.max(b.x);
+        let y0=a.y.min(b.y);let y1=a.y.max(b.y);
+        let append=is_key_down(KeyCode::LeftShift)
+            ||is_key_down(KeyCode::RightShift);
+        if !append{self.selected.units.clear();}
+        for o in &self.simulation.objects{
+            if !self.simulation.unit_owned(o.id){continue}
+            let p=self.screen(o.x as f32,o.y as f32);
+            if p.x>=x0&&p.x<=x1&&p.y>=y0&&p.y<=y1
+                &&!self.selected.units.contains(&o.id)
+                &&self.selected.units.len()<12{
+                self.selected.units.push(o.id);
+            }
+        }
+        self.selected.unit=self.selected.units.first().copied();
+        self.selected.object=self.selected.unit;
+    }
+    fn issue_order(&mut self,mouse:Vec2){
+        let target=self.pick_cell(mouse);
+        let target_id=self.hit_sprite(mouse,true);
+        let selected=if self.selected.units.is_empty(){
+            self.selected.unit.into_iter().collect::<Vec<_>>()
+        }else{self.selected.units.clone()};
+        if selected.is_empty(){
+            self.notify("Select one or more workers with LEFT CLICK");return
+        }
+        let mut accepted=0;
+        let mut error=None;
+        for unit in selected{
+            let result=if let Some(t)=target_id{
+                match self.simulation.entity(t){
+                    Some(o) if o.kind==2=>self.simulation.order_gather(unit,t),
+                    Some(o) if o.kind==1&&!o.complete
+                        =>self.simulation.order_construct(unit,t),
+                    _=>self.simulation.order_move(unit,target),
+                }
+            }else{self.simulation.order_move(unit,target)};
+            match result{Ok(())=>accepted+=1,Err(e)=>error=Some(e)}
+        }
+        if accepted>0{
+            self.notify(format!("Order accepted: {accepted} units to {},{}",target.0,target.1))
+        }else if let Some(e)=error{self.notify(format!("Order rejected: {e}"))}
+    }
     fn handle_mouse_click(&mut self,mouse:Vec2,left:bool){
-        if mouse.y<TOP||mouse.y>screen_height()-FOOT||
-            mouse.x>=screen_width()-SIDE{return}
+        if let Some(cell)=self.minimap_cell(mouse){
+            if left{
+                let h=self.simulation.terrain.height[
+                    self.simulation.terrain.index(cell.0,cell.1)];
+                self.camera=project(cell.0 as f32,cell.1 as f32,h);
+            }else{
+                self.issue_cell_order(cell);
+            }
+            return
+        }
+        let side_x=screen_width()-SIDE;
+        if mouse.x>=side_x{
+            // Build panel rows are mouse-selectable as in the original.
+            if left && mouse.y>=TOP+170.0{
+                for (i,ty) in [37,40,41].iter().enumerate(){
+                    let y=TOP+170.0+i as f32*43.0;
+                    if mouse.y>=y&&mouse.y<=y+34.0{
+                        self.selected.build=Some(*ty);
+                        return
+                    }
+                }
+                if (TOP+314.0..=TOP+344.0).contains(&mouse.y){
+                    self.selected.build=None;
+                }
+            }
+            return
+        }
+        if mouse.y<TOP||mouse.y>screen_height()-FOOT{return}
         let target=self.pick_cell(mouse);
         if left{
             if let Some(ty)=self.selected.build{
@@ -218,45 +423,37 @@ impl Game{
                         }
                         Err(e)=>self.notify(format!("Cannot build: {e}")),
                     }
-                }else{self.notify("Select your builder before placing a building")}
+                }else{self.notify("Select a builder before placing a building")}
                 return
             }
-            // Pick the closest displayed sprite anchor above the terrain.
-            // This accepts clicks on the upper parts of tall objects.
-            let hit=self.simulation.objects.iter().rev().filter_map(|o|{
-                let p=self.screen(o.x as f32,o.y as f32);
-                let dx=(mouse.x-p.x).abs();
-                let dy=p.y-mouse.y;
-                (dx<45.0*self.zoom && (-18.0*self.zoom..=190.0*self.zoom).contains(&dy))
-                    .then_some((o.id,(dx+dy.abs()*0.4) as i32))
-            }).min_by_key(|(_,score)|*score).map(|(id,_)|id)
-                .or_else(||self.simulation.object_at(target.0,target.1));
-            self.selected.object=hit;
-            self.selected.unit=hit.filter(|&id|self.simulation.unit_owned(id));
-            return
+            let hit=self.hit_sprite(mouse,false);
+            self.select_one(hit);
+        }else{self.issue_order(mouse);}
+    }
+    fn issue_cell_order(&mut self,cell:(i32,i32)){
+        let units=if self.selected.units.is_empty(){
+            self.selected.unit.into_iter().collect::<Vec<_>>()
+        }else{self.selected.units.clone()};
+        if units.is_empty(){return}
+        let mut count=0;
+        for unit in units{
+            if self.simulation.order_move(unit,cell).is_ok(){count+=1}
         }
-        let Some(unit)=self.selected.unit else{
-            self.notify("Select one of your units with LEFT CLICK");return
-        };
-        let target_id=self.simulation.object_at(target.0,target.1);
-        let result=if let Some(t)=target_id{
-            match self.simulation.entity(t){
-                Some(o) if o.kind==2=>self.simulation.order_gather(unit,t),
-                Some(o) if o.kind==1 && !o.complete
-                    =>self.simulation.order_construct(unit,t),
-                _=>self.simulation.order_move(unit,target)
-            }
-        }else{self.simulation.order_move(unit,target)};
-        match result{
-            Ok(())=>self.notify(format!("Order accepted: [{},{}]",target.0,target.1)),
-            Err(e)=>self.notify(format!("Order rejected: {e}"))
+        if count>0{
+            self.notify(format!("Minimap move: {count} units to {},{}",cell.0,cell.1));
         }
     }
 
     fn update(&mut self){
         let dt=get_frame_time().min(0.10);
         if is_key_pressed(KeyCode::Escape){
-            self.selected.build=None;
+            if self.selected.build.is_some(){
+                self.selected.build=None;
+            }else{
+                self.selected.unit=None;
+                self.selected.units.clear();
+                self.selected.object=None;
+            }
             self.selected.error=None;
         }
         if is_key_pressed(KeyCode::P){self.simulation.paused=!self.simulation.paused}
@@ -288,6 +485,8 @@ impl Game{
         if is_key_pressed(KeyCode::Key2){self.selected.build=Some(40)}
         if is_key_pressed(KeyCode::Key3){self.selected.build=Some(41)}
         if is_key_pressed(KeyCode::Key0){self.selected.build=None}
+        if is_key_pressed(KeyCode::PageUp){self.zoom=0.5}
+        if is_key_pressed(KeyCode::PageDown){self.zoom=1.0}
         let pan=PAN_SPEED*dt/self.zoom;
         if is_key_down(KeyCode::W)||is_key_down(KeyCode::Up){self.camera.y-=pan}
         if is_key_down(KeyCode::S)||is_key_down(KeyCode::Down){self.camera.y+=pan}
@@ -305,10 +504,40 @@ impl Game{
             self.camera-=mouse_delta_position()/self.zoom;
         }
         if is_mouse_button_pressed(MouseButton::Left){
-            self.handle_mouse_click(mouse,true)
+            self.left_press=Some(mouse);
+        }
+        if is_mouse_button_released(MouseButton::Left){
+            let start=self.left_press.take().unwrap_or(mouse);
+            let delta=(mouse-start).abs();
+            if delta.x>4.0||delta.y>4.0{
+                if start.x<screen_width()-SIDE && start.y>=TOP
+                    && self.selected.build.is_none(){
+                    self.select_box(start,mouse);
+                }else{
+                    self.handle_mouse_click(start,true);
+                }
+            }else{
+                self.handle_mouse_click(start,true);
+            }
         }
         if is_mouse_button_pressed(MouseButton::Right){
-            self.handle_mouse_click(mouse,false)
+            self.right_press=Some(mouse);
+        }
+        if is_mouse_button_released(MouseButton::Right){
+            let start=self.right_press.take().unwrap_or(mouse);
+            let delta=(mouse-start).abs();
+            if delta.x<10.0 && delta.y<10.0{
+                self.handle_mouse_click(start,false);
+            }
+        }
+        // Edge scrolling, as in the original RTS. The side panel is excluded.
+        if mouse.x<screen_width()-SIDE && mouse.y>=TOP && mouse.y<screen_height()-FOOT
+            && !is_mouse_button_down(MouseButton::Left){
+            let edge=15.0;
+            if mouse.x<edge{self.camera.x-=pan}
+            else if mouse.x>screen_width()-SIDE-edge{self.camera.x+=pan}
+            if mouse.y<TOP+edge{self.camera.y-=pan}
+            else if mouse.y>screen_height()-FOOT-edge{self.camera.y+=pan}
         }
         self.accumulator+=dt;
         for _ in 0..MAX_TICKS_PER_FRAME{
@@ -371,7 +600,8 @@ impl Game{
             let obj=&self.simulation.objects[index];
             let position=self.screen(obj.x as f32,obj.y as f32);
             let oid=rule_id(obj.group,obj.object_type);
-            let chosen=self.selected.object==Some(obj.id);
+            let chosen=self.selected.object==Some(obj.id)
+                ||self.selected.units.contains(&obj.id);
             if chosen{
                 draw_circle_lines(position.x,position.y,
                     21.0*self.zoom,2.0,YELLOW);
@@ -383,13 +613,26 @@ impl Game{
                 // bushes (9), rocks (13), animals, rubble begin at MS0.
                 let action=self.simulation.rule(obj).map_or(0,|rule|
                     resources::nature_initial_action(rule.class,rule.product));
-                let motion=match active_harvest.get(&obj.id).copied(){
-                    Some(t) if t>=48=>SpriteMotion::Finish{
-                        elapsed:(t-48) as u64,duration:12
-                    },
-                    _=>SpriteMotion::Still,
-                };
-                (action,motion)
+                if self.simulation.rule(obj).is_some_and(|r|r.class==7){
+                    let phase=animal_cycle_phase(obj.id,self.simulation.tick);
+                    // Real animal idle uses the original ID3 row. MG uses
+                    // one of the eight walking directions while wandering.
+                    if (1..=8).contains(&phase){
+                        (0,SpriteMotion::Loop(self.simulation.tick))
+                    }else if (20..=115).contains(&phase){
+                        (3,SpriteMotion::Loop(self.simulation.tick))
+                    }else{
+                        (0,SpriteMotion::Still)
+                    }
+                }else{
+                    let motion=match active_harvest.get(&obj.id).copied(){
+                        Some(t) if t>=48=>SpriteMotion::Finish{
+                            elapsed:(t-48) as u64,duration:12
+                        },
+                        _=>SpriteMotion::Still,
+                    };
+                    (action,motion)
+                }
             }else if obj.kind==0{
                 match &obj.task{
                     Task::Walking{..}=>(
@@ -399,7 +642,13 @@ impl Game{
                     Task::Gathering{time,..}=>(2,SpriteMotion::Loop(*time as u64)),
                     Task::Constructing{..}=>(2,SpriteMotion::Loop(self.simulation.tick)),
                     Task::Delivering{..}|Task::Holding{..}=>(4,SpriteMotion::Still),
-                    Task::Idle=>(0,SpriteMotion::Still),
+                    Task::Idle=>{
+                        if obj.carrying==0
+                            && unit_idle_phase(obj.id,self.simulation.tick)<20
+                            && self.sprites.has_slot(oid,3,obj.facing){
+                            (3,SpriteMotion::Loop(self.simulation.tick))
+                        }else{(0,SpriteMotion::Still)}
+                    },
                 }
             }else if obj.kind==1{
                 if obj.complete{(1,SpriteMotion::Still)}
@@ -411,7 +660,8 @@ impl Game{
                 let tint=if obj.kind==1 && !obj.complete{
                     Color::from_rgba(225,225,193,120)
                 }else{WHITE};
-                art.draw(position,self.zoom,motion,tint)
+                art.draw(position,self.zoom,motion,tint,obj.id,
+                    self.simulation.tick,obj.kind==1&&obj.complete,false)
             }else{
                 // Some rare original object descriptors have no matching GD art.
                 // Show a debug symbol instead of silently hiding game entities.
@@ -457,34 +707,55 @@ impl Game{
 
     fn minimap(&self,x:f32,y:f32,width:f32,height:f32){
         let n=self.simulation.terrain.size as f32;
-        let step=if n>256.0{4}else if n>128.0{2}else{1};
-        let step=step as usize;
-        let s=step as f32;
-        for cy in (0..self.simulation.terrain.size).step_by(step){
-            for cx in (0..self.simulation.terrain.size).step_by(step){
-                let color=if self.simulation.terrain.water(cx as i32,cy as i32){
-                    Color::from_rgba(30,77,132,255)
-                }else{
-                    Color::from_rgba(71,104,49,255)
-                };
-                draw_rectangle(x+cx as f32/n*width,y+cy as f32/n*height,
-                    s/n*width+0.1,s/n*height+0.1,color)
-            }
-        }
+        draw_texture_ex(&self.minimap_ground,x,y,WHITE,DrawTextureParams{
+            dest_size:Some(vec2(width,height)),..Default::default()
+        });
         for obj in &self.simulation.objects{
-            if obj.kind==1{
+            if obj.kind==1||obj.kind==0{
                 let color=if obj.group==self.simulation.human_race{GOLD}else{RED};
                 draw_rectangle(x+obj.x as f32/n*width,
                     y+obj.y as f32/n*height,3.0,3.0,color)
             }
         }
+        // Lightweight camera indicator, updated per frame.
+        let centre=unproject(self.camera);
+        draw_circle_lines(x+centre.x/n*width,y+centre.y/n*height,
+            7.0,1.0,WHITE);
     }
-
+    fn minimap_bounds(&self)->Option<(f32,f32,f32,f32)>{
+        let sh=screen_height();
+        if !self.minimap||sh<=710.0{return None}
+        let max=(sh-TOP-FOOT-508.0).clamp(90.0,170.0);
+        Some((screen_width()-SIDE+22.0,sh-FOOT-max-20.0,SIDE-44.0,max))
+    }
+    fn minimap_cell(&self,p:Vec2)->Option<(i32,i32)>{
+        let (x,y,w,h)=self.minimap_bounds()?;
+        if p.x<x||p.y<y||p.x>=x+w||p.y>=y+h{return None}
+        let n=self.simulation.terrain.size as f32;
+        Some((((p.x-x)/w*n) as i32,((p.y-y)/h*n) as i32))
+    }
+    fn draw_selection_marquee(&self){
+        if self.selected.build.is_some(){return}
+        let Some(start)=self.left_press else{return};
+        if start.x>=screen_width()-SIDE||start.y<TOP{return}
+        if !is_mouse_button_down(MouseButton::Left){return}
+        let (x,y)=mouse_position();
+        let end=vec2(x.min(screen_width()-SIDE),y.min(screen_height()-FOOT));
+        if (end-start).length()<4.0{return}
+        let x=start.x.min(end.x);let y=start.y.min(end.y);
+        let w=(end.x-start.x).abs();let h=(end.y-start.y).abs();
+        draw_rectangle_lines(x,y,w,h,1.5,GOLD);
+    }
     fn draw_hud(&self){
         let sw=screen_width();let sh=screen_height();
         let side_x=sw-SIDE;
         draw_rectangle(0.0,0.0,sw,TOP,Color::from_rgba(20,29,25,255));
         draw_text("THE LOST WORLD  |  RUST EDITION",20.0,38.0,29.0,GOLD);
+        if side_x>850.0{
+            draw_text(&format!("FPS: {} | GD CACHE: {}",
+                get_fps(),self.sprites.cache_size()),
+                side_x-250.0,38.0,17.0,LIGHTGRAY);
+        }
         draw_text(
             &format!("GOLD: {}     WOOD: {}     STONE: {}     FOOD: {}     TICK: {}     {}",
                 self.simulation.gold,self.simulation.goods[1],
@@ -524,7 +795,9 @@ impl Game{
             }
         }
         draw_text("0 - CANCEL BUILD",side_x+17.0,TOP+323.0,17.0,LIGHTGRAY);
-        draw_text("SELECTED",side_x+16.0,TOP+372.0,22.0,GOLD);
+        draw_text(&format!("SELECTED ({})",
+            self.selected.units.len().max(usize::from(self.selected.object.is_some()))),
+            side_x+16.0,TOP+372.0,22.0,GOLD);
         if let Some(id)=self.selected.object{
             if let Some(o)=self.simulation.entity(id){
                 let name=self.simulation.rule(o)
@@ -554,18 +827,16 @@ impl Game{
         }else{
             draw_text("Click a unit or object",side_x+16.0,TOP+403.0,18.0,WHITE);
         }
-        if self.minimap && sh>710.0{
-            let max=(sh-TOP-FOOT-508.0).clamp(90.0,170.0);
-            let map_y=sh-FOOT-max-20.0;
-            self.minimap(side_x+22.0,map_y,SIDE-44.0,max);
+        if let Some((x,y,w,h))=self.minimap_bounds(){
+            self.minimap(x,y,w,h);
         }
         draw_rectangle(0.0,sh-FOOT,sw,FOOT,Color::from_rgba(17,25,22,255));
         draw_text(
-            "LMB SELECT / PLACE    RMB ORDER / HARVEST / RESUME BUILD    WASD PAN    WHEEL ZOOM",
+            "LMB SELECT / DRAG GROUP    SHIFT ADD / CTRL TOGGLE    RMB ORDER    WASD PAN",
             14.0,sh-30.0,19.0,LIGHTGRAY
         );
         draw_text(
-            "P PAUSE    X DROP UNDELIVERED CARGO    F4 MAP    F5 SAVE    F9 LOAD",
+            "WHEEL ZOOM    PGUP/PGDN ZOOM    P PAUSE    X DROP CARGO    F4 MAP    F5/F9 SAVE/LOAD",
             14.0,sh-10.0,16.0,GRAY
         );
         if let Some((message,until))=&self.toast{
@@ -582,6 +853,7 @@ impl Game{
             self.update();
             clear_background(Color::from_rgba(26,42,37,255));
             self.draw_world();
+            self.draw_selection_marquee();
             self.draw_hud();
             next_frame().await;
         }
