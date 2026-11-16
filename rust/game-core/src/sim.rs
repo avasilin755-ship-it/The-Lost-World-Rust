@@ -97,11 +97,7 @@ impl Simulation {
 
     /// In original ODB, a building's anchor is its bottom-right footprint corner.
     pub fn covers(&self,o:&Entity,x:i32,y:i32)->bool{
-        if o.kind!=1{return o.x==x && o.y==y}
-        let (sx,sy)=self.rules.get(&rule_id(o.group,o.object_type))
-            .map_or((1,1),|r|(r.size_x.clamp(1,32),r.size_y.clamp(1,32)));
-        let n=self.terrain.size as i32;
-        (x-o.x).rem_euclid(n)>=n-sx+1 || (x-o.x).rem_euclid(n)==0
+        self.in_footprint(o,x,y)
     }
     fn blocked(&self,x:i32,y:i32,ignore:Option<u32>)->bool{
         if self.terrain.water(x,y){return true}
@@ -412,7 +408,8 @@ mod tests{
             size_bits:7,size:n,height:vec![0;n*n],class:vec![0;n*n],
             tile:vec![0;n*n],light:vec![162;n*n],rng_state:0
         };
-        t.class[t.index(3,3)]=11;
+        let water_cell=t.index(3,3);
+        t.class[water_cell]=11;
         let rules=Rules::new();
         let map=vec![
             MapObject{kind:0,group:2,object_type:19,owner:0,x:10,y:10,z:0},
