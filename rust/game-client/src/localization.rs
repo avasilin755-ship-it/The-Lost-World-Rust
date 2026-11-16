@@ -106,6 +106,7 @@ pub fn error_name(lang:Language,error:&GameError)->Cow<'static,str>{
         GameError::Busy=>"Рабочий занят",
         GameError::TownHallExists=>"Ратуша уже построена",
         GameError::TooManyEntities=>"Превышен лимит объектов",
+        GameError::WrongWorker=>"Нужен рабочий подходящей профессии",
     })
 }
 pub fn object_name<'a>(
