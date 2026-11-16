@@ -1066,6 +1066,38 @@ mod tests{
         assert!(sim.order_gather(1,2).is_ok());
     }
     #[test]
+    fn original_economy_runs_after_every_299_ticks(){
+        let mut sim=setup();
+        sim.goods[4]=10;
+        assert_eq!(sim.goods[4],10);
+        for _ in 0..(299*4){
+            sim.step();
+        }
+        assert_eq!(sim.goods[4],10);
+        for _ in 0..299{sim.step();}
+        assert_eq!(sim.goods[4],9);
+        assert!(sim.consumption.food_fraction<0.01);
+    }
+    #[test]
+    fn tlwsnap5_persists_economy_and_tlwsnap4_remains_readable(){
+        let mut sim=setup();
+        sim.races_present=[true,false,true];
+        sim.consumption.food_fraction=0.4;
+        sim.consumption.luxury_fraction=[0.1,0.2,0.3];
+        let snapshot=sim.save_snapshot();
+        assert!(snapshot.starts_with(b"TLWSNAP5"));
+        let mut loaded=setup();
+        loaded.load_snapshot(&snapshot).unwrap();
+        assert_eq!(loaded.races_present,[true,false,true]);
+        assert_eq!(loaded.consumption,sim.consumption);
+        let mut legacy=snapshot.clone();
+        legacy[..8].copy_from_slice(b"TLWSNAP4");
+        legacy.truncate(legacy.len()-17);
+        let mut old_loaded=setup();
+        old_loaded.load_snapshot(&legacy).unwrap();
+        assert_eq!(old_loaded.consumption,Consumption::default());
+    }
+    #[test]
     fn snapshot_v5_restores_paved_foundations_and_rng_state(){
         let mut sim=setup();
         sim.terrain.foundation(25,25,3,2);
