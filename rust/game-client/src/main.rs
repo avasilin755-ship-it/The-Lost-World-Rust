@@ -381,14 +381,8 @@ impl Game{
                 // class 8 (trees) begins at action 4 / CA0 (standing).
                 // classes 10-12 (crops) begin at action 1 / ST0.
                 // bushes (9), rocks (13), animals, rubble begin at MS0.
-                let action=match self.simulation.rule(obj).map(|r|r.class){
-                    Some(8)=>4,
-                    Some(10..=12)=>1,
-                    Some(9|13)=>0,
-                    _=>if self.simulation.rule(obj).is_some_and(|r|r.product==1){
-                        4
-                    }else{0},
-                };
+                let action=self.simulation.rule(obj).map_or(0,|rule|
+                    resources::nature_initial_action(rule.class,rule.product));
                 let motion=match active_harvest.get(&obj.id).copied(){
                     Some(t) if t>=48=>SpriteMotion::Finish{
                         elapsed:(t-48) as u64,duration:12
