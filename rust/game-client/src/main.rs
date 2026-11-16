@@ -10,7 +10,7 @@ mod resources;
 use game_core::{
     mission::{GameMap,Mission,parse_dvm,parse_mdb},
     rules::{parse_odb,merge_rules,rule_id},
-    sim::{Simulation,Entity,Task},
+    sim::{Simulation,Entity,Task,animal_cycle_phase},
     terrain::{Terrain,generate_base},
 };
 use macroquad::prelude::*;
@@ -23,6 +23,28 @@ const FOOT:f32=55.0;
 const PAN_SPEED:f32=500.0;
 const TICK_SECONDS:f32=0.10;
 const MAX_TICKS_PER_FRAME:usize=5;
+/// Static minimap ground is uploaded to the GPU once per loaded map.
+/// Previously the client issued up to 65k individual mini-rect draws per frame.
+fn minimap_ground_texture(terrain:&Terrain)->Texture2D{
+    let n=terrain.size as u16;
+    let mut image=Image::gen_image_color(n,n,Color::from_rgba(71,104,49,255));
+    for y in 0..terrain.size{
+        for x in 0..terrain.size{
+            let color=if terrain.water(x as i32,y as i32){
+                Color::from_rgba(30,77,132,255)
+            }else{
+                let h=terrain.height[terrain.index(x as i32,y as i32)] as f32;
+                let factor=((h-128.0)*0.55).clamp(-23.0,23.0) as i32;
+                let add=|v:i32| (v+factor).clamp(0,255) as u8;
+                Color::from_rgba(add(71),add(104),add(49),255)
+            };
+            image.set_pixel(x as u32,y as u32,color);
+        }
+    }
+    let texture=Texture2D::from_image(&image);
+    texture.set_filter(FilterMode::Nearest);
+    texture
+}
 fn window_conf()->Conf{
     Conf{
         window_title:"THE LOST WORLD — RUST EDITION".into(),
@@ -109,6 +131,7 @@ struct Game {
     simulation:Simulation,
     ground:TerrainArt,
     sprites:WorldArt,
+    minimap_ground:Texture2D,
     mission:Mission,
     camera:Vec2,
     zoom:f32,
@@ -167,6 +190,7 @@ impl Game{
             terrain,rules,map.objects.clone(),human,race.gold,race.goods
         ).map_err(|e|e.to_string())?;
         human_worker_if_needed(&mut simulation,&map.starts);
+        let minimap_ground=minimap_ground_texture(&simulation.terrain);
         let sprites=WorldArt::open(base_gd,addon_gd)?;
         let focus=simulation.selected_unit_ids().first()
             .and_then(|id|simulation.entity(*id))
@@ -180,7 +204,7 @@ impl Game{
         let save_file=PathBuf::from("saves")
             .join(format!("{}_{index}.tlwsnap",mission_name.trim_end_matches(".mdb")));
         Ok(Self{
-            simulation,ground,sprites,mission,camera,zoom:1.0,
+            simulation,ground,sprites,minimap_ground,mission,camera,zoom:1.0,
             selected:Selection::default(),accumulator:0.0,
             minimap:true,stored:map.terrain.is_some(),save_file,toast:None,
         })
@@ -383,13 +407,26 @@ impl Game{
                 // bushes (9), rocks (13), animals, rubble begin at MS0.
                 let action=self.simulation.rule(obj).map_or(0,|rule|
                     resources::nature_initial_action(rule.class,rule.product));
-                let motion=match active_harvest.get(&obj.id).copied(){
-                    Some(t) if t>=48=>SpriteMotion::Finish{
-                        elapsed:(t-48) as u64,duration:12
-                    },
-                    _=>SpriteMotion::Still,
-                };
-                (action,motion)
+                if self.simulation.rule(obj).is_some_and(|r|r.class==7){
+                    let phase=animal_cycle_phase(obj.id,self.simulation.tick);
+                    // Real animal idle uses the original ID3 row. MG uses
+                    // one of the eight walking directions while wandering.
+                    if (1..=8).contains(&phase){
+                        (0,SpriteMotion::Loop(self.simulation.tick))
+                    }else if (20..=115).contains(&phase){
+                        (3,SpriteMotion::Loop(self.simulation.tick))
+                    }else{
+                        (0,SpriteMotion::Still)
+                    }
+                }else{
+                    let motion=match active_harvest.get(&obj.id).copied(){
+                        Some(t) if t>=48=>SpriteMotion::Finish{
+                            elapsed:(t-48) as u64,duration:12
+                        },
+                        _=>SpriteMotion::Still,
+                    };
+                    (action,motion)
+                }
             }else if obj.kind==0{
                 match &obj.task{
                     Task::Walking{..}=>(
@@ -411,7 +448,8 @@ impl Game{
                 let tint=if obj.kind==1 && !obj.complete{
                     Color::from_rgba(225,225,193,120)
                 }else{WHITE};
-                art.draw(position,self.zoom,motion,tint)
+                art.draw(position,self.zoom,motion,tint,obj.id,
+                    self.simulation.tick,obj.kind==1&&obj.complete,false)
             }else{
                 // Some rare original object descriptors have no matching GD art.
                 // Show a debug symbol instead of silently hiding game entities.
@@ -457,29 +495,33 @@ impl Game{
 
     fn minimap(&self,x:f32,y:f32,width:f32,height:f32){
         let n=self.simulation.terrain.size as f32;
-        let step=if n>256.0{4}else if n>128.0{2}else{1};
-        let step=step as usize;
-        let s=step as f32;
-        for cy in (0..self.simulation.terrain.size).step_by(step){
-            for cx in (0..self.simulation.terrain.size).step_by(step){
-                let color=if self.simulation.terrain.water(cx as i32,cy as i32){
-                    Color::from_rgba(30,77,132,255)
-                }else{
-                    Color::from_rgba(71,104,49,255)
-                };
-                draw_rectangle(x+cx as f32/n*width,y+cy as f32/n*height,
-                    s/n*width+0.1,s/n*height+0.1,color)
-            }
-        }
+        draw_texture_ex(&self.minimap_ground,x,y,WHITE,DrawTextureParams{
+            dest_size:Some(vec2(width,height)),..Default::default()
+        });
         for obj in &self.simulation.objects{
-            if obj.kind==1{
+            if obj.kind==1||obj.kind==0{
                 let color=if obj.group==self.simulation.human_race{GOLD}else{RED};
                 draw_rectangle(x+obj.x as f32/n*width,
                     y+obj.y as f32/n*height,3.0,3.0,color)
             }
         }
+        // Lightweight camera indicator, updated per frame.
+        let centre=unproject(self.camera);
+        draw_circle_lines(x+centre.x/n*width,y+centre.y/n*height,
+            7.0,1.0,WHITE);
     }
-
+    fn minimap_bounds(&self)->Option<(f32,f32,f32,f32)>{
+        let sh=screen_height();
+        if !self.minimap||sh<=710.0{return None}
+        let max=(sh-TOP-FOOT-508.0).clamp(90.0,170.0);
+        Some((screen_width()-SIDE+22.0,sh-FOOT-max-20.0,SIDE-44.0,max))
+    }
+    fn minimap_cell(&self,p:Vec2)->Option<(i32,i32)>{
+        let (x,y,w,h)=self.minimap_bounds()?;
+        if p.x<x||p.y<y||p.x>=x+w||p.y>=y+h{return None}
+        let n=self.simulation.terrain.size as f32;
+        Some((((p.x-x)/w*n) as i32,((p.y-y)/h*n) as i32))
+    }
     fn draw_hud(&self){
         let sw=screen_width();let sh=screen_height();
         let side_x=sw-SIDE;
@@ -554,10 +596,8 @@ impl Game{
         }else{
             draw_text("Click a unit or object",side_x+16.0,TOP+403.0,18.0,WHITE);
         }
-        if self.minimap && sh>710.0{
-            let max=(sh-TOP-FOOT-508.0).clamp(90.0,170.0);
-            let map_y=sh-FOOT-max-20.0;
-            self.minimap(side_x+22.0,map_y,SIDE-44.0,max);
+        if let Some((x,y,w,h))=self.minimap_bounds(){
+            self.minimap(x,y,w,h);
         }
         draw_rectangle(0.0,sh-FOOT,sw,FOOT,Color::from_rgba(17,25,22,255));
         draw_text(
