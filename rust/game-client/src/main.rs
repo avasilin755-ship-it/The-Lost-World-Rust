@@ -85,20 +85,63 @@ fn tween_cell(tween:&SpriteTween,tick:u64,sub_tick:f32)->Vec2{
 }
 /// Static minimap ground is uploaded to the GPU once per loaded map.
 /// Previously the client issued up to 65k individual mini-rect draws per frame.
-fn minimap_ground_texture(terrain:&Terrain)->Texture2D{
-    let n=terrain.size as u16;
-    let mut image=Image::gen_image_color(n,n,Color::from_rgba(71,104,49,255));
-    for y in 0..terrain.size{
-        for x in 0..terrain.size{
-            let color=if terrain.water(x as i32,y as i32){
-                Color::from_rgba(30,77,132,255)
-            }else{
-                let h=terrain.height[terrain.index(x as i32,y as i32)] as f32;
-                let factor=((h-128.0)*0.55).clamp(-23.0,23.0) as i32;
-                let add=|v:i32| (v+factor).clamp(0,255) as u8;
-                Color::from_rgba(add(71),add(104),add(49),255)
-            };
-            image.set_pixel(x as u32,y as u32,color);
+const MINI_PX:usize=152;
+/// The original game's minimap has a 152x152 *transposed* image.
+/// Each tile contributes its average OS texture colour; neighbouring
+/// source pixels overlap, then relief shading and 3x3 Gaussian blur.
+fn minimap_ground_texture(
+    terrain:&Terrain,art:&TerrainArt,stored:bool
+)->Texture2D{
+    const N:usize=MINI_PX;
+    let map_size=terrain.size;
+    let step=map_size/N;
+    let mut raw=vec![[0u8;3];N*N];
+    for row in 0..N {
+        for col in 0..N {
+            // Original layout: minimap column <- world y;
+            // minimap row <- world x.
+            let x0=(row*map_size/N) as i32;
+            let y0=(col*map_size/N) as i32;
+            let mut sum=[0u64;3];
+            let samples=((step+1)*(step+1)) as u64;
+            for dx in 0..=step{
+                for dy in 0..=step{
+                    let rgb=art.minimap_rgb(
+                        terrain,x0+dx as i32,y0+dy as i32,stored
+                    );
+                    for c in 0..3{sum[c]+=u64::from(rgb[c])}
+                }
+            }
+            let shade=(192+8*(
+                i32::from(terrain.height[terrain.index(x0,y0)])
+                -i32::from(terrain.height[terrain.index(x0+1,y0-1)])
+            )).clamp(128,239) as u64;
+            for c in 0..3{
+                raw[row*N+col][c]=((sum[c]/samples)*shade/255) as u8;
+            }
+        }
+    }
+    // 1-2-1 Gaussian blur wraps both axes; performed only when terrain
+    // changes instead of once per world frame.
+    let mut image=Image::gen_image_color(N as u16,N as u16,BLACK);
+    for row in 0..N{
+        for col in 0..N{
+            let mut sums=[0u32;3];
+            for dy in 0..3{
+                for dx in 0..3{
+                    let rr=(row+N+dy-1)%N;
+                    let cc=(col+N+dx-1)%N;
+                    let weight=[1u32,2,1][dy]*[1u32,2,1][dx];
+                    for ch in 0..3{
+                        sums[ch]+=u32::from(raw[rr*N+cc][ch])*weight;
+                    }
+                }
+            }
+            image.set_pixel(col as u32,row as u32,Color::from_rgba(
+                (sums[0]/16) as u8,
+                (sums[1]/16) as u8,
+                (sums[2]/16) as u8,255
+            ));
         }
     }
     let texture=Texture2D::from_image(&image);
@@ -266,7 +309,7 @@ impl Game{
             terrain,rules,map.objects.clone(),human,race.gold,race.goods
         ).map_err(|e|e.to_string())?;
         human_worker_if_needed(&mut simulation,&map.starts);
-        let minimap_ground=minimap_ground_texture(&simulation.terrain);
+        let minimap_ground=minimap_ground_texture(&simulation.terrain,&ground,map.terrain.is_some());
         let sprites=WorldArt::open(base_gd,addon_gd)?;
         let focus=simulation.selected_unit_ids().first()
             .and_then(|id|simulation.entity(*id))
@@ -564,7 +607,7 @@ impl Game{
                         Ok(id)=>{
                             self.selected.object=Some(id);
                             self.minimap_ground=minimap_ground_texture(
-                                &self.simulation.terrain
+                                &self.simulation.terrain,&self.ground,self.stored
                             );
                             self.notify(if self.lang==Language::Russian{
                                 format!("Строительство начато: объект №{ty}")
@@ -626,7 +669,9 @@ impl Game{
         match result{
             Ok(())=>{
                 self.reset_sprite_movements();
-                self.minimap_ground=minimap_ground_texture(&self.simulation.terrain);
+                self.minimap_ground=minimap_ground_texture(
+                    &self.simulation.terrain,&self.ground,self.stored
+                );
                 self.notify(if self.lang==Language::Russian{
                     "Сохранение загружено"
                 }else{"Snapshot restored"})
