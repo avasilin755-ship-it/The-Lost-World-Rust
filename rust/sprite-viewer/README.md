@@ -2,6 +2,15 @@
 
 ## Isometric scene test (NEW)
 
+The scene also loads original .os tile sets from the same extracted Data
+directory as dv.gd: wiese.os, weg.os, wasser1..4.os and transition1..4.os.
+These supply original grass, gravel, animated water and coastline artwork.
+Cells use the original 64x44 isometric proportions. If any files are
+missing, the old flat-colour test tiles are used as a fallback.
+
+Limitations: the test land/sea outline is still synthetic; original map
+generation, full corner blending, elevations, building footprints and
+world simulation are separate later milestones.
 Launch a small experimental terrain with original GD building, unit,
 ship and neutral-nature sprites. The terrain shading and object placements
 are an illustrative testbed, **not yet a recreation of the original maps**.
