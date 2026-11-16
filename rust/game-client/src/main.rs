@@ -88,7 +88,7 @@ fn human_worker_if_needed(sim:&mut Simulation,starts:&[(i32,i32)]){
                     sim.objects.push(Entity{
                         id,kind:0,group:sim.human_race,object_type:11,
                         owner:sim.human_race,x,y,hp:100,complete:true,
-                        construction:100,task:Task::Idle,carrying:0
+                        construction:100,task:Task::Idle,carrying:0,facing:4
                     });
                     println!("Demo spawn: builder at {x},{y} because the map has no surface units");
                     return
@@ -376,23 +376,44 @@ impl Game{
                 draw_circle_lines(position.x,position.y,
                     21.0*self.zoom,2.0,YELLOW);
             }
-            let motion=if obj.kind==2{
-                // Depletion frames play only during the final 12 harvest ticks.
-                match active_harvest.get(&obj.id).copied(){
+            let (action,motion)=if obj.kind==2{
+                // Original ODB + OD initial display rules:
+                // class 8 (trees) begins at action 4 / CA0 (standing).
+                // classes 10-12 (crops) begin at action 1 / ST0.
+                // bushes (9), rocks (13), animals, rubble begin at MS0.
+                let action=match self.simulation.rule(obj).map(|r|r.class){
+                    Some(8)=>4,
+                    Some(10..=12)=>1,
+                    Some(9|13)=>0,
+                    _=>if self.simulation.rule(obj).is_some_and(|r|r.product==1){
+                        4
+                    }else{0},
+                };
+                let motion=match active_harvest.get(&obj.id).copied(){
                     Some(t) if t>=48=>SpriteMotion::Finish{
                         elapsed:(t-48) as u64,duration:12
                     },
                     _=>SpriteMotion::Still,
-                }
+                };
+                (action,motion)
             }else if obj.kind==0{
                 match &obj.task{
-                    Task::Walking{..}|Task::Constructing{..}
-                        =>SpriteMotion::Loop(self.simulation.tick),
-                    Task::Gathering{time,..}=>SpriteMotion::Loop(*time as u64),
-                    _=>SpriteMotion::Still,
+                    Task::Walking{..}=>(
+                        if obj.carrying>0{4}else{0},
+                        SpriteMotion::Loop(self.simulation.tick)
+                    ),
+                    Task::Gathering{time,..}=>(2,SpriteMotion::Loop(*time as u64)),
+                    Task::Constructing{..}=>(2,SpriteMotion::Loop(self.simulation.tick)),
+                    Task::Delivering{..}|Task::Holding{..}=>(4,SpriteMotion::Still),
+                    Task::Idle=>(0,SpriteMotion::Still),
                 }
-            }else{SpriteMotion::Still};
-            if let Some(art)=self.sprites.get(oid){
+            }else if obj.kind==1{
+                if obj.complete{(1,SpriteMotion::Still)}
+                else{(0,SpriteMotion::Finish{
+                    elapsed:obj.construction as u64,duration:101
+                })}
+            }else{(0,SpriteMotion::Still)};
+            if let Some(art)=self.sprites.get(oid,action,obj.facing){
                 let tint=if obj.kind==1 && !obj.complete{
                     Color::from_rgba(225,225,193,120)
                 }else{WHITE};
