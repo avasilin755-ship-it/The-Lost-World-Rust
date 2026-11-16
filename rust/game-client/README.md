@@ -44,6 +44,7 @@ Mission records are ordered by their original numeric index, not file position.
 - 0 / Esc: cancel construction placement
 - WASD / arrows or moving the mouse to the world edge: pan the camera
 - Mouse wheel: zoom; Page Up / Page Down: far-out / normal zoom
+- F10: switch interface language Russian / English (Russian by default if Cyrillic TTF is available)
 - Middle mouse drag: pan
 - X: explicitly discard undelivered cargo when no reachable storage exists (cargo is lost)
 - Building preview: green footprint means valid placement; red means invalid or worker busy
@@ -179,8 +180,49 @@ LRU eviction instead of throwing all variants away; alpha hit tests use
 one-bit masks; terrain water/coast names no longer allocate a new String
 per rendered cell. The HUD displays live FPS and cache occupancy.
 
-Existing limitations include original sprite motion interpolation, complete
+Existing limitations include exact original animation easing and timing, complete
 building activity/door events, animal eating and regrowth, combat effects,
 speech/sounds, the original multi-page interface and all command categories.
 Regression tests and CI prove compilation and basic invariants, **not**
 visual equivalence with external original game data or a specific FPS gain.
+
+## Русская локализация и плавное движение (2026-11-16)
+
+**Русский интерфейс включён по умолчанию**. Игровой клиент отображает
+ресурсы, кампанию, меню строительства, названия известных игровых объектов,
+статусы персонажей, сообщения, ошибки, подсказки и сохранения на русском языке.
+**F10** переключает русский и английский без перезапуска игры.
+
+Для кириллицы Macroquad загружает TTF **из самой операционной системы**;
+проприетарные шрифты Microsoft не копируются в репозиторий:
+
+- Windows: `C:\Windows\Fonts\segoeui.ttf`, `arial.ttf`, `tahoma.ttf`
+- Linux: установленные DejaVu Sans или Liberation Sans
+- Дополнительно можно указать `TLW_FONT` со своим TTF, содержащим кириллицу
+
+Если подходящий шрифт недоступен, включается английский интерфейс и
+выводится объяснение в PowerShell. Пример ручного выбора шрифта:
+
+~~~powershell
+$env:TLW_FONT = "C:\Windows\Fonts\arial.ttf"
+powershell -NoProfile -ExecutionPolicy Bypass -File .\rust\game-client\launch.ps1
+~~~
+
+Перевод не переписывает оригинальные ODB/OD/GD: используются русские
+эквиваленты по подтверждённым идентификаторам типов, а неизвестные
+названия остаются на исходном языке до пополнения словаря. Сейчас
+переведены большинство основных ролей юнитов и зданий, типы ресурсов,
+одна известная миссия «Засуха» и весь действующий интерфейс прототипа.
+Полная локализация сюжетных текстов оригинальной игры ещё не завершена.
+
+**Перемещение:** игровые координаты и A* остались детерминированными
+и сохраняются в TLWSNAP3, но спрайты юнитов и животных теперь плавно
+интерполируются между соседними клетками в течение 6 игровых тиков.
+Интерполяция учитывает замыкание координат карты по краям и применяется
+к отрисовке, попаданию мыши и выделению рамкой. Это визуальный слой:
+состояние экономики и симуляции не меняется.
+
+Проверка `cargo check`/`cargo test` в CI подтверждает компиляцию
+и автоматические регрессии. Визуально подтвердить отображение
+кириллицы, разбиение надписей и плавность анимации можно только
+запуском в Windows с оригинальными ресурсами.
