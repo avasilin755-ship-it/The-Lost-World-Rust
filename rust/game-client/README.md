@@ -277,3 +277,40 @@ terrain and interface drawing. The next video should keep the
 diagnostic overlay visible throughout the camera and zoom checks.
 
 See [the playtest checklist](TEST_CHECKLIST.md).
+
+
+## 2026-11-16, third playtest repair package
+
+Source: uploaded 56.53-second desktop review recording.
+The original interface, animated construction and F5/F9 prompts work.
+See [TEST_CHECKLIST.md](TEST_CHECKLIST.md) for evidence, limitations
+and exact timestamp-based validation requirements.
+
+**Updated client:** original-style per-type building/unit/nature
+selection panel, working command to resume an incomplete site,
+build-order profession checks, disabled invalid build buttons and
+per-good town storage capacity display.
+
+**Updated core:** 600-slot game scheduler in scheduler.rs with LIFO
+job order, persistent job holds and deterministic tests. Original
+economy formula from economy.rs consumes food/luxuries every 299
+gameplay ticks using float32 fractional carry. The live client currently
+counts outdoor own-race units as population; matching original town
+indoor residents/ownership is a remaining migration. Building work
+uses ten-stage, 15-tick/material-sensitive timing approximation rather
+than the earlier flat 100 ticks and increases HP as it progresses.
+It does not yet use original porter-driven material deliveries.
+
+**Saves:** TLWSNAP5 stores material/food/luxury fractions and race
+participation in addition to previous terrain and unit state; legacy
+versions 1–4 remain readable. The save is not compatible with original
+1999 game executables.
+
+**Graphics:** 60 FPS native limiter now uses coarse sleep followed
+by a short scheduling-yield phase to avoid Windows timer oversleep.
+The captured 54 FPS at 2.05x zoom was not CPU rendering-bound:
+the overlay showed ~0.1 ms update, 1.6 ms world and 0.4 ms HUD.
+The new frame pacing requires desktop confirmation.
+
+All new functionality is on the same rust-port-foundation branch, not
+a second standalone demo.
