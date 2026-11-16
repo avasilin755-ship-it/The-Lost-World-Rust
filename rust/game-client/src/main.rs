@@ -1142,9 +1142,19 @@ impl Game{
                 +((t3-t2)*1000.0) as f32*filter;
             #[cfg(all(not(target_arch="wasm32"),not(target_os="android")))]
             {
+                // Windows can oversleep a full 16.67-ms request and
+                // report ~54 FPS even when CPU rendering takes only 2 ms.
+                // Leave a 1-ms margin for the system scheduler and yield
+                // until the deadline instead of blocking the whole interval.
                 let elapsed=frame_start.elapsed();
-                if elapsed<limit{
-                    std::thread::sleep(limit-elapsed);
+                let slack=std::time::Duration::from_millis(1);
+                if let Some(coarse)=limit.checked_sub(elapsed+slack){
+                    if coarse>=std::time::Duration::from_millis(1){
+                        std::thread::sleep(coarse);
+                    }
+                }
+                while frame_start.elapsed()<limit{
+                    std::thread::yield_now();
                 }
             }
             next_frame().await;
