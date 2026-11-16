@@ -106,6 +106,7 @@ mod tests{
         let mut goods=[0;9];goods[6]=20;goods[7]=20;goods[8]=20;
         // Sajiki town: own threshold30, Amazon45, Pimmon75.
         // At 60 population: Amazon and Sajiki luxuries consumed; Pimmon not.
+        c.round(60,2,[true,true,true],&mut goods);
         let r=c.round(60,2,[true,true,true],&mut goods);
         assert_eq!(r.luxury_used[1],0);
         assert!(r.luxury_used[0]>0);
