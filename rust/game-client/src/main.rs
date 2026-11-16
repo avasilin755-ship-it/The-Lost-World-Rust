@@ -155,6 +155,7 @@ fn human_worker_if_needed(sim:&mut Simulation,starts:&[(i32,i32)]){
         .filter(|o|o.kind==1&&o.group==sim.human_race&&o.object_type==40)
         .map(|o|(o.x,o.y)).collect::<Vec<_>>();
     centers.extend(starts.iter().copied());
+    let mut spawned=0usize;
     for (cx,cy) in centers{
         for distance in 1..=9{
             for delta in -distance..=distance {
@@ -167,13 +168,18 @@ fn human_worker_if_needed(sim:&mut Simulation,starts:&[(i32,i32)]){
                     }
                     let id=sim.next_id;
                     sim.next_id+=1;
+                    // Original completed town halls release a builder and
+                    // two porters. Until full indoor-unit logic is ported,
+                    // place those three outside at nearby walkable cells.
+                    let role=if spawned==0{11}else{9};
                     sim.objects.push(Entity{
-                        id,kind:0,group:sim.human_race,object_type:11,
+                        id,kind:0,group:sim.human_race,object_type:role,
                         owner:sim.human_race,x,y,hp:100,complete:true,
                         construction:100,task:Task::Idle,carrying:0,facing:4
                     });
-                    println!("Demo spawn: builder at {x},{y} because the map has no surface units");
-                    return
+                    spawned+=1;
+                    println!("Initial worker {spawned}/3 (type {role}) at {x},{y}");
+                    if spawned>=3{return}
                 }
             }
         }
