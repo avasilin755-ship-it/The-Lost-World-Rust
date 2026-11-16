@@ -62,6 +62,11 @@ fn button(
 }
 
 fn buildable(g:&Game,ty:i32)->bool{
+    // The UI must not advertise a second town hall while the simulation
+    // correctly rejects founding another town in this single-town client.
+    if ty==40&&g.simulation.objects.iter().any(|o|
+        o.kind==1&&o.group==g.simulation.human_race&&o.object_type==40
+    ){return false}
     let rule=g.simulation.rules.get(&rule_id(g.simulation.human_race,ty));
     rule.is_some_and(|r|r.cost.iter().enumerate().all(|(i,&c)|
         c.max(0)<=g.simulation.goods[i]
@@ -348,9 +353,15 @@ pub fn click(g:&mut Game,mouse:Vec2,left:bool)->bool{
         }
     }
     if g.ui.page==HudPage::Build{
-        for (i,(ty,_,_,_)) in build_entries(g).iter().enumerate(){
+        for (i,(ty,_,enabled,_)) in build_entries(g).iter().enumerate(){
             if in_rect(local,8.0,372.0+i as f32*64.0,176.0,31.0){
-                g.selected.build=Some(*ty);
+                if *enabled{
+                    g.selected.build=Some(*ty);
+                }else{
+                    g.notify(if g.lang==crate::localization::Language::Russian{
+                        "Постройка недоступна: проверьте ресурсы и ограничения"
+                    }else{"Building unavailable: check stock and limits"});
+                }
                 return true
             }
         }
