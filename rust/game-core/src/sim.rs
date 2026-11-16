@@ -590,10 +590,10 @@ impl Simulation {
             .map(|o|o.id).collect()
     }
 
-    /// TLWSNAP3 additionally stores the unit's last facing direction.
-    /// Both TLWSNAP1 and TLWSNAP2 remain readable.
+    /// TLWSNAP4 stores terrain edits so constructed foundations survive F5/F9.
+    /// Versions 1-3 remain readable, but old snapshots cannot restore terrain edits.
     pub fn save_snapshot(&self)->Vec<u8>{
-        let mut b=b"TLWSNAP3".to_vec();
+        let mut b=b"TLWSNAP4".to_vec();
         b.extend_from_slice(&self.tick.to_le_bytes());
         b.push(u8::from(self.paused));
         b.extend_from_slice(&self.gold.to_le_bytes());
@@ -659,6 +659,13 @@ impl Simulation {
                 }
             }
         }
+        b.extend_from_slice(&self.terrain.rng_state.to_le_bytes());
+        for i in 0..self.terrain.height.len(){
+            b.extend_from_slice(&self.terrain.height[i].to_le_bytes());
+            b.push(self.terrain.class[i]);
+            b.push(self.terrain.tile[i]);
+            b.push(self.terrain.light[i]);
+        }
         b
     }
     pub fn load_snapshot(&mut self,b:&[u8])->Result<(),GameError>{
@@ -666,7 +673,8 @@ impl Simulation {
             return Err(GameError::Invalid("invalid snapshot header"))
         }
         let legacy=&b[..8]==b"TLWSNAP1";
-        let version3=&b[..8]==b"TLWSNAP3";
+        let version4=&b[..8]==b"TLWSNAP4";
+        let version3=&b[..8]==b"TLWSNAP3"||version4;
         if !legacy && !version3 && &b[..8]!=b"TLWSNAP2"{
             return Err(GameError::Invalid("invalid snapshot header"))
         }
@@ -773,11 +781,37 @@ impl Simulation {
                 complete,construction,task,carrying,facing
             });
         }
+        let saved_terrain=if version4{
+            let rng=u32::from_le_bytes(take(4)?.try_into().unwrap());
+            let count=self.terrain.height.len();
+            let mut height=Vec::with_capacity(count);
+            let mut class=Vec::with_capacity(count);
+            let mut tile=Vec::with_capacity(count);
+            let mut light=Vec::with_capacity(count);
+            for _ in 0..count{
+                height.push(u16::from_le_bytes(take(2)?.try_into().unwrap()));
+                let cls=take(1)?[0];
+                if cls>self.terrain.water_class+1{
+                    return Err(GameError::Invalid("invalid terrain class"))
+                }
+                class.push(cls);
+                tile.push(take(1)?[0]);
+                light.push(take(1)?[0]);
+            }
+            Some((rng,height,class,tile,light))
+        }else{None};
         if pos!=b.len()||next_id<=ids.iter().copied().max().unwrap_or(0){
             return Err(GameError::Invalid("snapshot trailing data or invalid next id"))
         }
         self.tick=tick;self.gold=gold;self.goods=goods;self.next_id=next_id;
         self.objects=objects;self.paused=paused;
+        if let Some((rng,height,class,tile,light))=saved_terrain{
+            self.terrain.rng_state=rng;
+            self.terrain.height=height;
+            self.terrain.class=class;
+            self.terrain.tile=tile;
+            self.terrain.light=light;
+        }
         Ok(())
     }
 }
