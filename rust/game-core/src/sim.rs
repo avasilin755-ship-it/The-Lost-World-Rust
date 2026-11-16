@@ -109,10 +109,26 @@ impl Simulation {
             });
         }
         let next_id=states.len() as u32+1;
-        Ok(Self{
+        let mut world=Self{
             terrain,rules,objects:states,next_id,human_race,
             gold,goods,paused:false,tick:0
-        })
+        };
+        // Base mission terrain was generated from a seed and therefore has
+        // not yet had any building pads constructed. Original map loading
+        // levels and paves them before displaying the first scene.
+        if world.terrain.water_class==11{
+            let pads=world.objects.iter().filter(|o|o.kind==1).filter_map(|o|{
+                world.rules.get(&rule_id(o.group,o.object_type)).map(|r|
+                    (o.x,o.y,o.object_type,r.size_x,r.size_y)
+                )
+            }).collect::<Vec<_>>();
+            for (x,y,ty,sx,sy) in pads{
+                if ty!=62&&ty!=63{
+                    world.terrain.foundation(x,y,sx,sy)
+                }
+            }
+        }
+        Ok(world)
     }
 
     pub fn entity(&self,id:u32)->Option<&Entity>{self.objects.iter().find(|o|o.id==id)}
@@ -375,6 +391,9 @@ impl Simulation {
             self.goods[i]-=(*cost).max(0);
         }
         self.next_id+=1;
+        if rule.object_type!=62&&rule.object_type!=63{
+            self.terrain.foundation(at.0,at.1,rule.size_x,rule.size_y)
+        }
         self.entity_mut(unit).unwrap().task=Task::Walking{
             steps:path,after:After::Construct(id)
         };
