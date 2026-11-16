@@ -8,6 +8,7 @@
 use crate::mission::MapObject;
 use crate::rules::{ObjectRule, Rules, rule_id};
 use crate::terrain::Terrain;
+use crate::economy::{Consumption,ECONOMY_ROUND_TICKS};
 use std::{cmp::Reverse, collections::{BinaryHeap, HashMap, HashSet}};
 
 pub const GOOD_WOOD:usize=1;
@@ -78,6 +79,10 @@ pub struct Simulation {
     pub gold:i32,
     pub goods:[i32;9],
     pub paused:bool,
+    /// Original per-town food/luxury fractional consumption state. There
+    /// is one simulated player town in the current integrated client.
+    pub consumption:Consumption,
+    pub races_present:[bool;3],
 }
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub enum GameError{
@@ -109,9 +114,12 @@ impl Simulation {
             });
         }
         let next_id=states.len() as u32+1;
+        let mut present=[false;3];
+        if (0..3).contains(&human_race){present[human_race as usize]=true}
         let mut world=Self{
             terrain,rules,objects:states,next_id,human_race,
-            gold,goods,paused:false,tick:0
+            gold,goods,paused:false,tick:0,
+            consumption:Consumption::default(),races_present:present,
         };
         // Base mission terrain was generated from a seed and therefore has
         // not yet had any building pads constructed. Original map loading
@@ -594,18 +602,29 @@ impl Simulation {
         if !removed.is_empty(){
             self.objects.retain(|o|!removed.contains(&o.id));
         }
-        // Integration placeholder, intentionally NOT claimed as original economy.
-        // A full faithful tax/needs/round scheduler is a later subsystem.
+        // First live economy subsystem: food/luxury every 299 ticks.
+        // Population is currently approximated by the active outdoor
+        // units of the player's race; original indoor residents and
+        // multiple towns are pending separate migrations.
+        if self.tick%ECONOMY_ROUND_TICKS==0{
+            let population=self.objects.iter().filter(|o|
+                o.kind==0&&o.group==self.human_race
+            ).count();
+            self.consumption.round(
+                population,self.human_race.clamp(0,2) as usize,
+                self.races_present,&mut self.goods
+            );
+        }
     }
     pub fn selected_unit_ids(&self)->Vec<u32>{
         self.objects.iter().filter(|o|o.kind==0 && o.group==self.human_race)
             .map(|o|o.id).collect()
     }
 
-    /// TLWSNAP4 stores terrain edits so constructed foundations survive F5/F9.
-    /// Versions 1-3 remain readable, but old snapshots cannot restore terrain edits.
+    /// TLWSNAP5 extends V4 with food/luxury fractions and participating
+    /// races. Versions 1-4 remain readable for backwards compatibility.
     pub fn save_snapshot(&self)->Vec<u8>{
-        let mut b=b"TLWSNAP4".to_vec();
+        let mut b=b"TLWSNAP5".to_vec();
         b.extend_from_slice(&self.tick.to_le_bytes());
         b.push(u8::from(self.paused));
         b.extend_from_slice(&self.gold.to_le_bytes());
@@ -678,6 +697,15 @@ impl Simulation {
             b.push(self.terrain.tile[i]);
             b.push(self.terrain.light[i]);
         }
+        b.extend_from_slice(&self.consumption.food_fraction.to_le_bytes());
+        for value in self.consumption.luxury_fraction{
+            b.extend_from_slice(&value.to_le_bytes());
+        }
+        let mut race_mask=0u8;
+        for (i,present) in self.races_present.iter().enumerate(){
+            if *present{race_mask|=1<<i}
+        }
+        b.push(race_mask);
         b
     }
     pub fn load_snapshot(&mut self,b:&[u8])->Result<(),GameError>{
@@ -685,7 +713,8 @@ impl Simulation {
             return Err(GameError::Invalid("invalid snapshot header"))
         }
         let legacy=&b[..8]==b"TLWSNAP1";
-        let version4=&b[..8]==b"TLWSNAP4";
+        let version5=&b[..8]==b"TLWSNAP5";
+        let version4=&b[..8]==b"TLWSNAP4"||version5;
         let version3=&b[..8]==b"TLWSNAP3"||version4;
         if !legacy && !version3 && &b[..8]!=b"TLWSNAP2"{
             return Err(GameError::Invalid("invalid snapshot header"))
@@ -812,11 +841,35 @@ impl Simulation {
             }
             Some((rng,height,class,tile,light))
         }else{None};
+        let saved_economy=if version5{
+            let food=f32::from_le_bytes(take(4)?.try_into().unwrap());
+            let mut lux=[0f32;3];
+            for value in &mut lux{
+                *value=f32::from_le_bytes(take(4)?.try_into().unwrap())
+            }
+            if ![food,lux[0],lux[1],lux[2]].iter().all(|v|
+                v.is_finite()&&*v>=0.0&&*v<1.0
+            ){
+                return Err(GameError::Invalid("invalid economy fraction"))
+            }
+            let mask=take(1)?[0];
+            if mask&!7!=0{return Err(GameError::Invalid("invalid race mask"))}
+            let races=std::array::from_fn(|i|mask&(1<<i)!=0);
+            Some((Consumption{
+                food_fraction:food,luxury_fraction:lux
+            },races))
+        }else{None};
         if pos!=b.len()||next_id<=ids.iter().copied().max().unwrap_or(0){
             return Err(GameError::Invalid("snapshot trailing data or invalid next id"))
         }
         self.tick=tick;self.gold=gold;self.goods=goods;self.next_id=next_id;
         self.objects=objects;self.paused=paused;
+        if let Some((consumption,races))=saved_economy{
+            self.consumption=consumption;
+            self.races_present=races;
+        }else{
+            self.consumption=Consumption::default();
+        }
         if let Some((rng,height,class,tile,light))=saved_terrain{
             self.terrain.rng_state=rng;
             self.terrain.height=height;
@@ -1013,11 +1066,11 @@ mod tests{
         assert!(sim.order_gather(1,2).is_ok());
     }
     #[test]
-    fn snapshot_v4_restores_paved_foundations_and_rng_state(){
+    fn snapshot_v5_restores_paved_foundations_and_rng_state(){
         let mut sim=setup();
         sim.terrain.foundation(25,25,3,2);
         let snapshot=sim.save_snapshot();
-        assert!(snapshot.starts_with(b"TLWSNAP4"));
+        assert!(snapshot.starts_with(b"TLWSNAP5"));
         let mut loaded=setup();
         loaded.load_snapshot(&snapshot).unwrap();
         assert_eq!(loaded.terrain.height,sim.terrain.height);
