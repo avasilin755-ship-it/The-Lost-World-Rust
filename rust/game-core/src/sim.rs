@@ -21,6 +21,12 @@ const NEIGHBOURS:[(i32,i32);8]=[
 /// These indexes match MG0..MG7 in the original game archives.
 /// Native animals alternate roaming and their original ID3 idle animation.
 /// The period is deterministic per entity, independent of frame rate.
+/// Idle workers occasionally turn and play a native ID3/ID5 fidget.
+/// A per-entity offset prevents synchronized animations across the map.
+pub fn unit_idle_phase(id:u32,tick:u64)->u64{
+    let period=50+(id as u64*113)%250;
+    (tick+id as u64*37)%period
+}
 pub fn animal_cycle_phase(id:u32,tick:u64)->u64{
     let period=140+(id as u64*29)%55;
     (tick+id as u64*13)%period
@@ -447,7 +453,11 @@ impl Simulation {
             if self.objects[i].kind!=0{continue}
             let task=self.objects[i].task.clone();
             match task{
-                Task::Idle=>{},
+                Task::Idle=>{
+                    if self.objects[i].carrying==0 && unit_idle_phase(id,self.tick)==0{
+                        self.objects[i].facing=if id%2==0{3}else{5};
+                    }
+                },
                 Task::Walking{mut steps,after}=>{
                     if self.tick%6!=0{continue}
                     if !steps.is_empty(){
@@ -834,6 +844,19 @@ mod tests{
         assert_eq!(sim.entity(1).unwrap().carrying,0);
         assert_eq!(sim.entity(1).unwrap().task,Task::Idle);
         assert_eq!(sim.goods[GOOD_WOOD],0);
+    }
+    #[test]
+    fn idle_fidgets_do_not_interfere_with_active_worker_jobs(){
+        let mut sim=setup();
+        let start=sim.entity(1).unwrap().facing;
+        assert!(unit_idle_phase(1,0)<300);
+        for _ in 0..600{sim.step()}
+        assert!(sim.entity(1).unwrap().facing<8);
+        // A fixed movement order always takes control over idle fidgets.
+        sim.order_move(1,(11,10)).unwrap();
+        for _ in 0..6{sim.step()}
+        assert_eq!(sim.entity(1).unwrap().facing,5);
+        assert!(start<8);
     }
     #[test]
     fn wild_animals_wander_without_touching_wood_or_berries(){
