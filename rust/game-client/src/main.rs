@@ -260,6 +260,14 @@ impl Game{
             self.selected.error=None;
         }
         if is_key_pressed(KeyCode::P){self.simulation.paused=!self.simulation.paused}
+        if is_key_pressed(KeyCode::X){
+            if let Some(unit)=self.selected.unit{
+                match self.simulation.drop_cargo(unit){
+                    Ok(())=>self.notify("Carried resources dropped; worker is free"),
+                    Err(e)=>self.notify(format!("Cannot drop cargo: {e}")),
+                }
+            }
+        }
         if is_key_pressed(KeyCode::F4){self.minimap=!self.minimap}
         if is_key_pressed(KeyCode::F5){
             let result=fs::create_dir_all("saves")
@@ -542,7 +550,7 @@ impl Game{
             14.0,sh-30.0,19.0,LIGHTGRAY
         );
         draw_text(
-            "P PAUSE    F4 MINIMAP    F5 SAVE    F9 LOAD    middle-drag PAN",
+            "P PAUSE    X DROP UNDELIVERED CARGO    F4 MAP    F5 SAVE    F9 LOAD",
             14.0,sh-10.0,16.0,GRAY
         );
         if let Some((message,until))=&self.toast{
