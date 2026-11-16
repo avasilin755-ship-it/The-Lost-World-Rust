@@ -153,21 +153,48 @@ impl TerrainArt{
             (project(px as f32,py as f32,h)-camera)*zoom+origin
         };
         let top=coord(0);let left=coord(1);let right=coord(2);let bottom=coord(3);
-        let shade=|x:i32,y:i32|{
-            let value=terrain.light[terrain.index(x,y)];
-            Color::from_rgba(value,value,value,255)
+        let mesh_for=|tex:&Texture2D,alphas:[u8;4]|{
+            let shade=|x:i32,y:i32,alpha:u8|{
+                let light=terrain.light[terrain.index(x,y)];
+                Color::from_rgba(light,light,light,alpha)
+            };
+            Mesh{
+                vertices:vec![
+                    Vertex::new(top.x,top.y,0.0,1.0,1.0,shade(x,y,alphas[0])),
+                    Vertex::new(left.x,left.y,0.0,0.0,1.0,shade(x+1,y,alphas[1])),
+                    Vertex::new(right.x,right.y,0.0,1.0,0.0,shade(x,y+1,alphas[2])),
+                    Vertex::new(bottom.x,bottom.y,0.0,0.0,0.0,shade(x+1,y+1,alphas[3]))
+                ],
+                indices:vec![0,1,2,1,2,3],
+                texture:Some(tex.clone()),
+            }
         };
-        let mesh=Mesh{
-            vertices:vec![
-                Vertex::new(top.x,top.y,0.0,1.0,1.0,shade(x,y)),
-                Vertex::new(left.x,left.y,0.0,0.0,1.0,shade(x+1,y)),
-                Vertex::new(right.x,right.y,0.0,1.0,0.0,shade(x,y+1)),
-                Vertex::new(bottom.x,bottom.y,0.0,0.0,0.0,shade(x+1,y+1))
-            ],
-            indices:vec![0,1,2,1,2,3],
-            texture:Some(texture.clone()),
-        };
-        draw_mesh(&mesh);
+        draw_mesh(&mesh_for(texture,[255;4]));
+        // The initial Rust renderer painted the whole cell using only its
+        // bottom corner's terrain class. This produced the harsh stairstep
+        // blocks visible in the November playtest. Blend alternate original
+        // OS materials by the matching vertex weights. Coastline quads keep
+        // their dedicated original transition images.
+        if mask==0{
+            let mut seen=[false;12];
+            seen[class]=true;
+            for (corner,&other_class) in corners_class.iter().enumerate(){
+                let other=other_class as usize;
+                if other>=self.class_names.len()||seen[other]{continue}
+                seen[other]=true;
+                let name=self.class_names[other];
+                let (px,py)=corners[corner];
+                let tile=terrain.tile[terrain.index(px,py)] as usize;
+                let tile=if stored {
+                    tile.saturating_sub(self.starts[other])
+                }else{tile};
+                let tex=self.get(name,tile);
+                let alphas=corners_class.map(|c|
+                    if c==other_class{255}else{0}
+                );
+                draw_mesh(&mesh_for(tex,alphas));
+            }
+        }
         if selected{
             let c=Color::from_rgba(254,224,92,180);
             for (a,b) in [(top,left),(left,bottom),(bottom,right),(right,top)]{
