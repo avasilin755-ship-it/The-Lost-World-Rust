@@ -104,7 +104,6 @@ impl TimingWheel{
             if job.hold>0{
                 let hold=job.hold;
                 // In the original, a held job is deferred, without running.
-                job.hold=0;
                 if job.cancelled{continue}
                 self.schedule(job,hold);
                 continue
@@ -140,7 +139,7 @@ mod tests{
         wheel.add(JobKind::TownFood(7),299).unwrap();
         for _ in 0..600{
             wheel.step(|job|{
-                seen.push((wheel_tick_placeholder(job),job.kind));
+                seen.push(job.kind);
                 299
             }).unwrap();
         }
@@ -148,7 +147,6 @@ mod tests{
         // first 600 ticks, never every render frame.
         assert_eq!(seen.len(),2);
     }
-    fn wheel_tick_placeholder(job:Job)->u64{job.id}
     #[test]
     fn cancelled_or_held_jobs_do_not_execute_before_release(){
         let mut wheel=TimingWheel::new();
@@ -157,7 +155,12 @@ mod tests{
         assert!(wheel.cancel(cancel));
         assert!(wheel.hold(delayed,3).unwrap());
         let mut hits=Vec::new();
-        for _ in 0..8{
+        for _ in 0..4{
+            wheel.step(|j|{hits.push(j.kind);0}).unwrap();
+        }
+        assert!(hits.is_empty());
+        assert!(wheel.hold(delayed,0).unwrap());
+        for _ in 0..3{
             wheel.step(|j|{hits.push(j.kind);0}).unwrap();
         }
         assert_eq!(hits,vec![JobKind::Custom(2)]);
