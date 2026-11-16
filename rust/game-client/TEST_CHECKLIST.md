@@ -116,6 +116,86 @@ switches to unrelated desktop applications.
 - [ ] Test original settings and HUD pages at both 1280x720 and
       1920x1080. Check Russian text truncation and tiny controls.
 
+## Fourth Windows playtest — 2026-11-16 (94.57 seconds)
+
+Source: attached video 20261116-1932-39.4098216.mp4, recorded in
+1920x1038 at 30 video fps.
+
+**What the video confirms:** Original Saxiki race HUD, Russian labels and
+animated objects remain visible; the house reaches 50% at about 27 s,
+80% at 36 s, and returns to an earlier ~40% construction stage after a
+load near 45 s. A "builder assigned to construction" toast appears
+near 54 s and the finished house has 350 HP with status Built at 63 s.
+Saving mid-build and continuing after load is therefore visually
+verified in this capture.
+
+**Performance regression:** F3 at 81 s: about 58 FPS, zoom 2.05x,
+661 objects, 74 cached sprite entries, update 0.1 ms, world 1.2 ms,
+HUD 0.3 ms. F3 at 90 s: about 34 FPS at zoom 0.50x, update 0.0 ms,
+world 2.5 ms, HUD 0.2 ms. Neither total CPU time alone explains the
+elapsed frame duration; excessive GPU texture changes or sync are
+possible causes, not proven by the capture.
+
+**Main confirmed original parity gap:** Up to this recording,
+construction resources were charged at placement and did not need to
+be physically brought by porters to the site. The new code uses a
+separate site ledger, original-style one-unit porter trips and
+15-tick builder consumption/work phases. New TLWSNAP6 stores active
+transport orders and site inventory. The terrain renderer now packs
+original OS frames into one GPU atlas to cut texture switches at zoom
+0.50x. Both changes need **new visual validation**.
+
+### New targeted regression checklist
+
+- [ ] Start a house (original cost 3 wood, 4 stone in this map). Immediately
+      verify the town inventory is unchanged and the selected site's
+      delivered/remaining counts start at 0/3 and 0/4, rather than
+      consuming all stock at placement.
+- [ ] Watch the two original type-9 porters: one must travel to the
+      completed hall/warehouse, collect a single item and walk back to
+      the site. The city's stock must decrease only on pickup. There
+      should be no instant teleporting materials.
+- [ ] When the builder is waiting for wood/stone, the construction
+      percentage must **stop**. After a matching item arrives, the
+      builder consumes it and the next work step advances progress.
+- [ ] Create a site without enough wood/stone. It must be allowed and
+      remain waiting instead of becoming a free completed building.
+      The original build menu allows such placements.
+- [ ] While a porter carries an item, press F5, let them deliver it,
+      then F9. The porter and building must return to their saved
+      positions, the site material count must not duplicate, and
+      construction should continue after the delivery.
+- [ ] Save and load a site at 40–80% and verify exact HP, progress and
+      needed/local material quantities. Also test loading an older
+      TLWSNAP5 save into the new client without corruption.
+- [ ] Test interruption: manually send a porter elsewhere after pickup;
+      cargo must not disappear or cause the site to receive extra
+      resources. The worker can bring it to a completed store later.
+- [ ] Complete a second warehouse. Check the original storage capacity
+      increases by 25 for every good; delivered goods must not exceed
+      the per-good maximum. Construction sites add zero capacity.
+- [ ] Repeat F3 measurements in the **same** landscape, without
+      changing the window: 0.50x, 1.00x, 2.05x. Note FPS and CPU
+      update/world/HUD time for at least 10 seconds at each zoom.
+      The prior baseline is 34 FPS at 0.50x and 58 FPS at 2.05x.
+- [ ] Examine snow, ground, shore, water animation and mixed-class
+      tile borders **after the atlas change**. Verify there are no
+      new black tiles, texel bleeding, swapped OS variants, diagonal
+      UV errors, flicker or seams at non-integer zoom.
+- [ ] Move the camera beyond all four world edges and compare the
+      mini-map's scrolling with the game view. No gaps or missing
+      objects should appear.
+- [ ] Test Russian selection/build/settings pages at 1280x720 and
+      1920x1080. Material counters and the "Resume construction"
+      button must remain readable and clickable.
+
+**Explicit remaining original-system gaps:** This is not the complete
+1999 construction and porter system. The original prioritized request
+dispatcher, door queues, per-town stock, transport cancellations and
+actual producer jobs still need porting. The 600-slot scheduler is
+implemented as a separate Rust module but most live tasks are still
+updated directly from Simulation::step.
+
 ## Pull and launch
 
 ~~~powershell
