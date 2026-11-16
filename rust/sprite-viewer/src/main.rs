@@ -1,11 +1,18 @@
-//! The Lost World: inspect locally exported original sprite animations.
+//! The Lost World: original GD sprite viewer, powered by Macroquad.
 //!
-//! No original assets are committed to or loaded from this repository.
-//! Run from the repository root:
-//! cargo run --manifest-path rust/sprite-viewer/Cargo.toml -- "C:\Users\Admin\Games\DieVolker_Original\SpritePreview"
+//! Read a local original GD archive directly, decode animations in Rust,
+//! and upload RGBA frames as GPU textures without any intermediate PNG files.
+//! Legacy PNG-folder preview is also supported.
+//! Original game assets stay on the user's computer, outside the repository.
 
+use game_core::gd::{OpacityMode, decode_gd_frames, gd_index_size, parse_gd_index};
 use macroquad::prelude::*;
-use std::{env, fs, path::PathBuf};
+use std::{
+    env, fs,
+    fs::File,
+    io::{Read, Seek, SeekFrom},
+    path::{Path, PathBuf},
+};
 
 fn window_conf() -> Conf {
     Conf {
@@ -37,6 +44,75 @@ fn png_files(folder: &PathBuf) -> Result<Vec<PathBuf>, String> {
     Ok(files)
 }
 
+fn load_gd_sprite(path: &Path, sprite_name: &str) -> Result<(Vec<Texture2D>, Vec<String>), String> {
+    let mut file = File::open(path).map_err(|e| format!("Cannot open {}: {e}", path.display()))?;
+    let length = usize::try_from(file.metadata().map_err(|e| e.to_string())?.len())
+        .map_err(|e| e.to_string())?;
+    let mut header = [0u8; 24];
+    file.read_exact(&mut header).map_err(|e| e.to_string())?;
+    let index_size = gd_index_size(&header).map_err(|e| e.to_string())?;
+    if !(24..=64 * 1024 * 1024).contains(&index_size) || index_size > length {
+        return Err("Invalid .gd index size".into());
+    }
+    let mut index_bytes = vec![0u8; index_size];
+    file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+    file.read_exact(&mut index_bytes).map_err(|e| e.to_string())?;
+    let index = parse_gd_index(&index_bytes, length).map_err(|e| e.to_string())?;
+    let entry = index.get(sprite_name).ok_or_else(|| {
+        format!("Sprite '{sprite_name}' not found. Archive contains {} sprites; use gd_inspect to list names.", index.entries.len())
+    })?;
+    if entry.data_length == 0 || entry.data_length > 64 * 1024 * 1024 {
+        return Err("Invalid or unusually large GD block".into());
+    }
+    if entry.frames == 0 || entry.frames > 256 {
+        return Err("Animation must contain between 1 and 256 frames".into());
+    }
+    if entry.width > u16::MAX as usize || entry.height > u16::MAX as usize {
+        return Err("Sprite dimensions exceed texture limits".into());
+    }
+
+    // Load only the selected sprite's pixel block (not the entire large GD archive).
+    let mut block = vec![0u8; entry.data_length];
+    file.seek(SeekFrom::Start(entry.data_offset as u64)).map_err(|e| e.to_string())?;
+    file.read_exact(&mut block).map_err(|e| e.to_string())?;
+    let frames = decode_gd_frames(entry, &block, None, OpacityMode::Preserve)
+        .map_err(|e| format!("Cannot decode {sprite_name}: {e}"))?;
+    let mut textures = Vec::with_capacity(frames.len());
+    let mut names = Vec::with_capacity(frames.len());
+    for (i, rgba) in frames.iter().enumerate() {
+        let texture = Texture2D::from_rgba8(entry.width as u16, entry.height as u16, rgba);
+        texture.set_filter(FilterMode::Nearest);
+        textures.push(texture);
+        names.push(format!("{sprite_name} [{i}]"));
+    }
+    println!(
+        "Loaded '{}' directly from {} ({} x {}, {} frames)",
+        sprite_name, path.display(), entry.width, entry.height, frames.len()
+    );
+    Ok((textures, names))
+}
+
+async fn load_png_folder(folder: &PathBuf) -> Result<(Vec<Texture2D>, Vec<String>), String> {
+    let paths = png_files(folder)?;
+    let mut textures = Vec::new();
+    let mut names = Vec::new();
+    for file in paths {
+        let file_str = file.to_string_lossy();
+        match load_texture(&file_str).await {
+            Ok(texture) => {
+                texture.set_filter(FilterMode::Nearest);
+                textures.push(texture);
+                names.push(file.file_name().unwrap_or_default().to_string_lossy().into_owned());
+            }
+            Err(error) => eprintln!("Cannot load {}: {error}", file.display()),
+        }
+    }
+    if textures.is_empty() {
+        return Err("None of the PNGs could be loaded".into());
+    }
+    Ok((textures, names))
+}
+
 fn checkerboard(width: f32, height: f32, cell: f32) {
     let dark = Color::from_rgba(58, 63, 63, 255);
     let light = Color::from_rgba(79, 85, 84, 255);
@@ -57,38 +133,39 @@ fn checkerboard(width: f32, height: f32, cell: f32) {
 
 #[macroquad::main(window_conf)]
 async fn main() {
-    let Some(path) = env::args_os().nth(1) else {
-        eprintln!("Usage: cargo run --manifest-path rust/sprite-viewer/Cargo.toml -- <PNG-folder>");
+    let mut args = env::args_os().skip(1);
+    let Some(source_path) = args.next() else {
+        eprintln!("Usage:");
+        eprintln!("  cargo run --manifest-path rust/sprite-viewer/Cargo.toml -- <archive.gd> <exact-sprite-name>");
+        eprintln!("  cargo run --manifest-path rust/sprite-viewer/Cargo.toml -- <PNG-folder>");
         return;
     };
-    let folder = PathBuf::from(path);
-    let paths = match png_files(&folder) {
-        Ok(paths) => paths,
+    let source = PathBuf::from(source_path);
+    let is_gd = source.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("gd"));
+    let result = if is_gd {
+        match args.next() {
+            Some(name) => match name.into_string() {
+                Ok(name) => load_gd_sprite(&source, &name),
+                Err(_) => Err("Sprite name must be valid Unicode".into()),
+            },
+            None => Err("Missing sprite name after GD archive path. Use gd_inspect to list exact names.".into()),
+        }
+    } else if source.is_dir() {
+        load_png_folder(&source).await
+    } else {
+        Err(format!("Expected a .gd archive or PNG folder, got: {}", source.display()))
+    };
+    if args.next().is_some() {
+        eprintln!("Unexpected additional command line arguments");
+        return;
+    }
+    let (textures, names) = match result {
+        Ok(data) => data,
         Err(err) => {
             eprintln!("{err}");
             return;
         }
     };
-
-    let mut textures = Vec::new();
-    let mut names = Vec::new();
-    for file in paths {
-        let file_str = file.to_string_lossy();
-        match load_texture(&file_str).await {
-            Ok(texture) => {
-                // Keep original pixel edges crisp when magnified.
-                texture.set_filter(FilterMode::Nearest);
-                textures.push(texture);
-                names.push(file.file_name()
-                    .unwrap_or_default().to_string_lossy().into_owned());
-            }
-            Err(error) => eprintln!("Cannot load {}: {error}", file.display()),
-        }
-    }
-    if textures.is_empty() {
-        eprintln!("None of the PNGs could be loaded.");
-        return;
-    }
 
     let mut frame_index = 0usize;
     let mut playing = true;
