@@ -254,7 +254,7 @@ pub struct Layer {
 }
 pub struct SpriteArt {layers:Vec<Layer>}
 impl SpriteArt {
-    fn draw(&self,screen:Vec2,zoom:f32,seconds:f64){
+    pub fn draw(&self,screen:Vec2,zoom:f32,seconds:f64){
         for layer in &self.layers{
             let n=layer.textures.len();
             if n==0{continue}
