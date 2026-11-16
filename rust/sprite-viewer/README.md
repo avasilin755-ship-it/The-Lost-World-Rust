@@ -1,47 +1,54 @@
-# The Lost World — sprite viewer (direct GD support)
+# The Lost World — Rust Sprite Viewer and GD Catalog
 
-The viewer now supports loading original .gd archives directly into GPU textures.
-It reads only the sprite index and selected image block, not all artwork.
-PNG-folder preview mode is still supported.
+A local development tool, built with **Rust + Macroquad 0.4.16**.
+Original game files are never uploaded or committed.
 
-## Open Mission Pack from original archive (PowerShell)
+## Windows 11 — browse all original sprites
 
-    $root = "$HOME\Games\DieVolker_Original"
-    cargo run --manifest-path rust/sprite-viewer/Cargo.toml -- "$root\GameAssets\MissionPack\ADDON.GD" 'SA\VE\TRANSPORTSCHIFF\MG7'
-
-## Open base game directly (PowerShell)
-
-    $baseGD = Get-ChildItem "$root\GameAssets\Base" -Recurse -File -Filter "dv.gd" | Select-Object -First 1 -ExpandProperty FullName
-    cargo run --manifest-path rust/sprite-viewer/Cargo.toml -- "$baseGD" 'SA\VE\WIRT\MG7'
-
-Local original assets are never committed or uploaded by this viewer.
-
-## Legacy PNG-folder viewer and controls
-
-
-A temporary standalone desktop prototype using Rust and Macroquad 0.4.16.
-It can also preview PNG animations previously exported by `gd_export_png`.
-
-The game assets are read locally only and are **not** part of this repository.
-
-## Windows 11 usage
-
-From the repository root:
+Open PowerShell in the repository root and run:
 
 ```powershell
-cargo run --manifest-path rust/sprite-viewer/Cargo.toml -- "$HOME\Games\DieVolker_Original\SpritePreview"
+$root = "$HOME\Games\DieVolker_Original"
+$baseGD = Get-ChildItem "$root\GameAssets\Base" -Recurse -File -Filter "dv.gd" | Select-Object -First 1 -ExpandProperty FullName
+$addonGD = "$root\GameAssets\MissionPack\ADDON.GD"
+
+cargo run --manifest-path rust/sprite-viewer/Cargo.toml -- --catalog "$baseGD" "$addonGD"
 ```
 
-For the first run, Cargo downloads Macroquad and compiles the graphical application.
+The browser reads both sprite **indexes** at startup (1940 + 289 entries
+in the currently tested original archives). It decodes individual sprite
+pixel blocks only on selection, allowing live previews without converting
+the entire archive to PNG.
 
-Controls:
+### Catalog controls
 
+- Type letters, numbers or backslashes — search by sprite name
+- Backspace — erase one character
+- Esc — clear search, or close the window if search is empty
+- Tab — switch source filter: All / Base / Addon
+- Up / Down and PageUp / PageDown — browse entries
+- Home / End — jump to beginning / end
+- Mouse click — select list entry
+- Mouse wheel on list — scroll the list
+- Mouse wheel on preview or + / - — integer zoom (1–12x)
+- Left / Right — previous / next animation frame
 - Space — play / pause
-- Left / Right — previous / next animation frame (pauses)
-- Mouse wheel, Up / Down — zoom from 1x to 12x with nearest filtering
-- Comma / Period — animation speed from 1 to 24 frames/second
-- B — checkerboard / dark background
-- Esc — close
+- Comma / period — frames per second, 1–24
+- F2 — toggle checkerboard background
 
-This is a **sprite animation viewer**, not a complete game. It is a separate Cargo
-workspace so that the portable `game-core` remains dependency-free for now.
+## Direct GD sprite preview (existing mode)
+
+```powershell
+cargo run --manifest-path rust/sprite-viewer/Cargo.toml -- "$addonGD" 'SA\VE\TRANSPORTSCHIFF\MG7'
+```
+
+## Legacy preview of a PNG folder
+
+```powershell
+cargo run --manifest-path rust/sprite-viewer/Cargo.toml -- "$root\SpritePreview"
+```
+
+These are **asset inspection tools**, not a playable strategy game.
+The portable `game-core` remains independent of the graphics runtime.
+
+The archives must be obtained and used in accordance with applicable licenses and copyright law.
