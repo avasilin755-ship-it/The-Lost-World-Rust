@@ -123,6 +123,7 @@ fn human_worker_if_needed(sim:&mut Simulation,starts:&[(i32,i32)]){
 #[derive(Default)]
 struct Selection{
     unit:Option<u32>,
+    units:Vec<u32>,
     object:Option<u32>,
     build:Option<i32>,
     error:Option<(String,f64)>,
@@ -141,6 +142,9 @@ struct Game {
     stored:bool,
     save_file:PathBuf,
     toast:Option<(String,f64)>,
+    left_press:Option<Vec2>,
+    right_press:Option<Vec2>,
+    last_click:Option<(u32,f64)>,
 }
 impl Game{
     fn new(
@@ -207,6 +211,7 @@ impl Game{
             simulation,ground,sprites,minimap_ground,mission,camera,zoom:1.0,
             selected:Selection::default(),accumulator:0.0,
             minimap:true,stored:map.terrain.is_some(),save_file,toast:None,
+            left_press:None,right_press:None,last_click:None,
         })
     }
 
@@ -227,9 +232,181 @@ impl Game{
         println!("{message}");
         self.toast=Some((message,get_time()+4.0));
     }
+    /// OD action matching the visible object's gameplay state, for accurate
+    /// hit-testing across roofs, units, and tree canopies.
+    fn visual_action(&self,obj:&Entity)->u8{
+        if obj.kind==1{return u8::from(obj.complete)}
+        if obj.kind==2{
+            if self.simulation.rule(obj).is_some_and(|r|r.class==7){
+                let phase=animal_cycle_phase(obj.id,self.simulation.tick);
+                return if (20..=115).contains(&phase){3}else{0};
+            }
+            return self.simulation.rule(obj).map_or(0,|r|
+                resources::nature_initial_action(r.class,r.product))
+        }
+        if obj.kind==0{
+            return match obj.task{
+                Task::Walking{..} if obj.carrying>0=>4,
+                Task::Gathering{..}|Task::Constructing{..}=>2,
+                Task::Holding{..}|Task::Delivering{..}=>4,
+                _=>0,
+            }
+        }
+        0
+    }
+    /// Hit the actual alpha shape, not just an object's anchor or a ground tile.
+    /// Priority follows the original game: unit, nature, building, tree.
+    fn hit_sprite(&mut self,mouse:Vec2,right:bool)->Option<u32>{
+        let mut candidates:Vec<(usize,i32,u32,Vec2,u32,u8,u8)>=Vec::new();
+        for o in &self.simulation.objects{
+            let p=self.screen(o.x as f32,o.y as f32);
+            if (p.x-mouse.x).abs()>480.0*self.zoom
+                ||(p.y-mouse.y).abs()>480.0*self.zoom{continue}
+            let class=self.simulation.rule(o).map_or(-1,|r|r.class);
+            let priority=if right{
+                match o.kind{
+                    0 if o.group!=self.simulation.human_race=>0,
+                    0=>1,
+                    2 if class!=8=>2,
+                    1 if o.group!=self.simulation.human_race=>3,
+                    1=>4,
+                    _=>5,
+                }
+            }else{
+                match o.kind{
+                    0 if self.simulation.unit_owned(o.id)=>0,
+                    0=>1,
+                    2 if class!=8=>2,
+                    1 if o.group==self.simulation.human_race=>3,
+                    1=>4,
+                    _=>5,
+                }
+            };
+            candidates.push((
+                priority,-(o.x+o.y),o.id,p,
+                rule_id(o.group,o.object_type),self.visual_action(o),o.facing
+            ));
+        }
+        candidates.sort_unstable_by_key(|v|(v.0,v.1));
+        for (_,_,id,p,oid,action,dir) in candidates{
+            if self.sprites.get(oid,action,dir).is_some_and(|art|
+                art.hit(p,self.zoom,mouse)){
+                return Some(id)
+            }
+        }
+        None
+    }
+    fn select_one(&mut self,hit:Option<u32>){
+        let shift=is_key_down(KeyCode::LeftShift)||is_key_down(KeyCode::RightShift);
+        let ctrl=is_key_down(KeyCode::LeftControl)||is_key_down(KeyCode::RightControl);
+        let unit=hit.filter(|&id|self.simulation.unit_owned(id));
+        if !shift && !ctrl{
+            self.selected.units.clear();
+        }
+        if let Some(id)=unit{
+            if ctrl {
+                if let Some(index)=self.selected.units.iter().position(|&other|other==id){
+                    self.selected.units.remove(index);
+                }else if self.selected.units.len()<12{
+                    self.selected.units.push(id);
+                }
+            }else if !self.selected.units.contains(&id)&&self.selected.units.len()<12{
+                self.selected.units.push(id);
+            }
+            let now=get_time();
+            if !shift&&!ctrl && self.last_click.is_some_and(|(previous,when)|
+                previous==id && now-when<0.36){
+                if let Some(origin)=self.simulation.entity(id){
+                    let kind=origin.object_type;
+                    let cell=(origin.x,origin.y);
+                    let ids=self.simulation.objects.iter()
+                        .filter(|o|o.kind==0&&self.simulation.unit_owned(o.id)
+                            &&o.object_type==kind
+                            &&(o.x-cell.0).abs()<=5&&(o.y-cell.1).abs()<=5)
+                        .take(12).map(|o|o.id).collect::<Vec<_>>();
+                    self.selected.units=ids;
+                }
+            }
+            self.last_click=Some((id,now));
+        }else{
+            self.last_click=None;
+        }
+        self.selected.unit=self.selected.units.first().copied();
+        self.selected.object=self.selected.unit.or(hit);
+    }
+    fn select_box(&mut self,a:Vec2,b:Vec2){
+        let x0=a.x.min(b.x);let x1=a.x.max(b.x);
+        let y0=a.y.min(b.y);let y1=a.y.max(b.y);
+        let append=is_key_down(KeyCode::LeftShift)
+            ||is_key_down(KeyCode::RightShift);
+        if !append{self.selected.units.clear();}
+        for o in &self.simulation.objects{
+            if !self.simulation.unit_owned(o.id){continue}
+            let p=self.screen(o.x as f32,o.y as f32);
+            if p.x>=x0&&p.x<=x1&&p.y>=y0&&p.y<=y1
+                &&!self.selected.units.contains(&o.id)
+                &&self.selected.units.len()<12{
+                self.selected.units.push(o.id);
+            }
+        }
+        self.selected.unit=self.selected.units.first().copied();
+        self.selected.object=self.selected.unit;
+    }
+    fn issue_order(&mut self,mouse:Vec2){
+        let target=self.pick_cell(mouse);
+        let target_id=self.hit_sprite(mouse,true);
+        let selected=if self.selected.units.is_empty(){
+            self.selected.unit.into_iter().collect::<Vec<_>>()
+        }else{self.selected.units.clone()};
+        if selected.is_empty(){
+            self.notify("Select one or more workers with LEFT CLICK");return
+        }
+        let mut accepted=0;
+        let mut error=None;
+        for unit in selected{
+            let result=if let Some(t)=target_id{
+                match self.simulation.entity(t){
+                    Some(o) if o.kind==2=>self.simulation.order_gather(unit,t),
+                    Some(o) if o.kind==1&&!o.complete
+                        =>self.simulation.order_construct(unit,t),
+                    _=>self.simulation.order_move(unit,target),
+                }
+            }else{self.simulation.order_move(unit,target)};
+            match result{Ok(())=>accepted+=1,Err(e)=>error=Some(e)}
+        }
+        if accepted>0{
+            self.notify(format!("Order accepted: {accepted} units to {},{}",target.0,target.1))
+        }else if let Some(e)=error{self.notify(format!("Order rejected: {e}"))}
+    }
     fn handle_mouse_click(&mut self,mouse:Vec2,left:bool){
-        if mouse.y<TOP||mouse.y>screen_height()-FOOT||
-            mouse.x>=screen_width()-SIDE{return}
+        if let Some(cell)=self.minimap_cell(mouse){
+            if left{
+                let h=self.simulation.terrain.height[
+                    self.simulation.terrain.index(cell.0,cell.1)];
+                self.camera=project(cell.0 as f32,cell.1 as f32,h);
+            }else{
+                self.issue_cell_order(cell);
+            }
+            return
+        }
+        let side_x=screen_width()-SIDE;
+        if mouse.x>=side_x{
+            // Build panel rows are mouse-selectable as in the original.
+            if left && mouse.y>=TOP+170.0{
+                for (i,ty) in [37,40,41].iter().enumerate(){
+                    let y=TOP+170.0+i as f32*43.0;
+                    if mouse.y>=y&&mouse.y<=y+34.0{
+                        self.selected.build=Some(*ty);
+                        return
+                    }
+                }
+                if (TOP+314.0..=TOP+344.0).contains(&mouse.y){
+                    self.selected.build=None;
+                }
+            }
+            return
+        }
+        if mouse.y<TOP||mouse.y>screen_height()-FOOT{return}
         let target=self.pick_cell(mouse);
         if left{
             if let Some(ty)=self.selected.build{
@@ -242,38 +419,24 @@ impl Game{
                         }
                         Err(e)=>self.notify(format!("Cannot build: {e}")),
                     }
-                }else{self.notify("Select your builder before placing a building")}
+                }else{self.notify("Select a builder before placing a building")}
                 return
             }
-            // Pick the closest displayed sprite anchor above the terrain.
-            // This accepts clicks on the upper parts of tall objects.
-            let hit=self.simulation.objects.iter().rev().filter_map(|o|{
-                let p=self.screen(o.x as f32,o.y as f32);
-                let dx=(mouse.x-p.x).abs();
-                let dy=p.y-mouse.y;
-                (dx<45.0*self.zoom && (-18.0*self.zoom..=190.0*self.zoom).contains(&dy))
-                    .then_some((o.id,(dx+dy.abs()*0.4) as i32))
-            }).min_by_key(|(_,score)|*score).map(|(id,_)|id)
-                .or_else(||self.simulation.object_at(target.0,target.1));
-            self.selected.object=hit;
-            self.selected.unit=hit.filter(|&id|self.simulation.unit_owned(id));
-            return
+            let hit=self.hit_sprite(mouse,false);
+            self.select_one(hit);
+        }else{self.issue_order(mouse);}
+    }
+    fn issue_cell_order(&mut self,cell:(i32,i32)){
+        let units=if self.selected.units.is_empty(){
+            self.selected.unit.into_iter().collect::<Vec<_>>()
+        }else{self.selected.units.clone()};
+        if units.is_empty(){return}
+        let mut count=0;
+        for unit in units{
+            if self.simulation.order_move(unit,cell).is_ok(){count+=1}
         }
-        let Some(unit)=self.selected.unit else{
-            self.notify("Select one of your units with LEFT CLICK");return
-        };
-        let target_id=self.simulation.object_at(target.0,target.1);
-        let result=if let Some(t)=target_id{
-            match self.simulation.entity(t){
-                Some(o) if o.kind==2=>self.simulation.order_gather(unit,t),
-                Some(o) if o.kind==1 && !o.complete
-                    =>self.simulation.order_construct(unit,t),
-                _=>self.simulation.order_move(unit,target)
-            }
-        }else{self.simulation.order_move(unit,target)};
-        match result{
-            Ok(())=>self.notify(format!("Order accepted: [{},{}]",target.0,target.1)),
-            Err(e)=>self.notify(format!("Order rejected: {e}"))
+        if count>0{
+            self.notify(format!("Minimap move: {count} units to {},{}",cell.0,cell.1));
         }
     }
 
