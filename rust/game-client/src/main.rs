@@ -8,7 +8,7 @@
 mod resources;
 
 use game_core::{
-    mission::{GameMap,MapObject,Mission,parse_dvm,parse_mdb},
+    mission::{GameMap,Mission,parse_dvm,parse_mdb},
     rules::{parse_odb,merge_rules,rule_id},
     sim::{Simulation,Entity,Task},
     terrain::{Terrain,generate_base},
