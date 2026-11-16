@@ -8,7 +8,7 @@
 use crate::mission::MapObject;
 use crate::rules::{ObjectRule, Rules, rule_id};
 use crate::terrain::Terrain;
-use crate::economy::{Consumption,ECONOMY_ROUND_TICKS};
+use crate::economy::{Consumption,ECONOMY_ROUND_TICKS,storage_capacity};
 use std::{cmp::Reverse, collections::{BinaryHeap, BTreeMap, HashMap, HashSet}};
 
 pub const GOOD_WOOD:usize=1;
@@ -733,7 +733,16 @@ impl Simulation {
                     }else if self.entity(storage).is_some_and(|o|
                         o.complete&&o.kind==1&&(o.object_type==40||o.object_type==41)
                     ){
-                        self.goods[good]=self.goods[good].saturating_add(amount);
+                        // Each completed hall/warehouse adds 25 storage
+                        // capacity per good. Excess arriving cargo is lost,
+                        // as in original economic handling (economy.md §7).
+                        let capacity=storage_capacity(
+                            self.objects.iter().filter(|o|o.kind==1)
+                                .map(|o|(o.group,o.object_type,o.complete)),
+                            self.human_race
+                        );
+                        self.goods[good]=self.goods[good]
+                            .saturating_add(amount).min(capacity);
                         self.objects[i].carrying=0;
                         self.objects[i].task=Task::Idle;
                     }else{
