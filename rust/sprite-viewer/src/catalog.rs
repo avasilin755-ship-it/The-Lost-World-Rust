@@ -32,7 +32,7 @@ struct Item {
     entry: usize,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SourceFilter {
     All,
     Base,
