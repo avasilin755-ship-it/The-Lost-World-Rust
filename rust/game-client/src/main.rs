@@ -464,7 +464,7 @@ impl Game{
                     17.0,YELLOW);
             }
         }else{
-            draw_text("Click a unit or object",side_x+16.0,TOP+403.0,18.0,WHITE)
+            draw_text("Click a unit or object",side_x+16.0,TOP+403.0,18.0,WHITE);
         }
         if self.minimap && sh>710.0{
             let max=(sh-TOP-FOOT-508.0).clamp(90.0,170.0);
