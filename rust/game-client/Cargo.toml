@@ -1,0 +1,13 @@
+[package]
+name = "the-lost-world"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+macroquad = "=0.4.16"
+game-core = { path = "../game-core" }
+
+# Standalone desktop/Android-ready game client; the deterministic core
+# remains independent from this rendering application.
+[workspace]
